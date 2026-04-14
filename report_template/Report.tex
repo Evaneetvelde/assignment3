@@ -1,0 +1,140 @@
+\documentclass[11pt,a4paper]{report}
+\usepackage{marvosym}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{tikz}
+
+\assignment{3}
+\group{...}
+\students{..........}{..........}
+
+% Placeholder for figures not yet generated
+% Usage: \figplaceholder{width in cm}{height in cm}{label text}
+\newcommand{\figplaceholder}[3]{%
+    \begin{tikzpicture}
+        \draw[gray!50, dashed, thick] (0,0) rectangle (#1,#2);
+        \node[gray!60, align=center, font=\small\itshape] at (#1/2, #2/2) {#3};
+    \end{tikzpicture}%
+}
+
+\begin{document}
+
+\maketitle
+
+\section{Q1 — Nombre de fourmis}
+% ============================================================
+
+\noindent En utilisant la stratégie \texttt{smart} sur l'environnement \texttt{05\_square\_four\_food\_spots} (300~s max, 10\,000 steps max), faites varier le nombre total de fourmis de 1 à 200 (pas de 20, 10 runs par point) et générez la courbe de performances (steps moyens $\pm$ écart-type), en ajoutant pour chaque point le temps moyen pris.
+
+\begin{figure}[h!]
+    \centering
+    % Replace with: \includegraphics[width=\linewidth]{figures/q4_ant_count_steps.pdf}
+    \figplaceholder{14}{7}{Steps pour atteindre l'objectif (75\% collectée, 33\% rapportée à la colonie)\\ en fonction du nombre de fourmis (moyenne $\pm$ écart-type)}
+    \caption{Steps nécessaires pour atteindre l'objectif en fonction du nombre de fourmis.}
+    \label{fig:q4_steps}
+\end{figure}
+
+\begin{figure}[h!]
+    \centering
+    % Replace with: \includegraphics[width=\linewidth]{figures/q4_ant_count_time.pdf}
+    \figplaceholder{14}{7}{Temps d'exécution moyen (secondes)\\ en fonction du nombre de fourmis (moyenne $\pm$ écart-type)}
+    \caption{Temps d'exécution moyen pour atteindre l'objectif en fonction du nombre de fourmis.}
+    \label{fig:q4_time}
+\end{figure}
+
+\noindent Existe-t-il un nombre optimal ? Au-delà d'un certain seuil, ajouter des fourmis nuit-il aux performances ? Justifiez en vous appuyant sur les statistiques observées.
+
+\begin{answers}[10cm]
+% Votre réponse ici
+\end{answers}
+
+
+% ============================================================
+\section{Q2 — Taux d'évaporation des phéromones}
+% ============================================================
+
+\noindent En utilisant la stratégie \texttt{smart} sur l'environnement \texttt{05\_square\_four\_food\_spots} (300~s max, 10\,000 steps max, 70 fourmis), faites varier le taux d'évaporation des phéromones entre 0.500 et 0.999 (20 points régulièrement espacés, 10 runs par point) et générez la courbe de performances correspondante (steps moyens $\pm$ écart-type).
+
+\begin{figure}[h!]
+    \centering
+    % Replace with: \includegraphics[width=\linewidth]{figures/q3_evaporation.pdf}
+    \figplaceholder{14}{7}{Steps pour atteindre l'objectif (75\% collectée, 33\% rapportée à la colonie)\\ en fonction du taux d'évaporation (moyenne $\pm$ écart-type)}
+    \caption{Steps nécessaires pour atteindre l'objectif (75\% collectée, 33\% rapportée à la colonie) en fonction du taux d'évaporation des phéromones.}
+    \label{fig:q3_evaporation}
+\end{figure}
+
+\noindent Interprétez la forme de la courbe en termes de trade-off exploration/exploitation : qu'arrive-t-il aux pistes de phéromones lorsque le taux est trop bas ? Trop élevé ? Où se situe l'optimum et pourquoi ?
+
+\begin{answers}[10cm]
+% Votre réponse ici
+\end{answers}
+
+\newpage
+
+% ============================================================
+\section{Q3 — Cheater strategy et analyses avancées}
+% ============================================================
+
+\noindent\textbf{\textcolor{red}{$\bigtriangleup$ Attention}} — faites cette question \textbf{en dernier}. L'implémentation du cheater fait appel à l'IA générative et implique de donner accès à l'objet \texttt{Environment} complet. Si vous demandez à l'IA de modifier votre \texttt{smart.py} pour y intégrer ce mécanisme, vous risquez de casser votre stratégie principale. Travaillez dans un fichier \texttt{cheater.py} séparé et n'y touchez qu'après avoir finalisé et validé vos autres stratégies.
+
+\subsection*{Implémentation du Cheater}
+
+\noindent Contrairement aux stratégies précédentes qui ne peuvent exploiter que l'objet \texttt{AntPerception}, vous devrez ici implémenter une stratégie "triche" dans \texttt{cheater.py}. Cette stratégie a un accès illégal à l'objet \texttt{Environment} complet, ce qui lui confère une omniscience totale sur la simulation.
+
+\noindent Votre \texttt{cheater.py} doit obligatoirement :
+\begin{itemize}
+    \item Implémenter la méthode \texttt{set\_environment(self, environment)} pour recevoir une référence directe à l'environnement global.
+    \item Utiliser les positions globales de la nourriture (\texttt{env.food\_positions}) et de la colonie (\texttt{env.colony\_positions}) directement, sans passer par \texttt{AntPerception}.
+    \item Connaître sa position exacte dans la grille en consultant \texttt{env.ants} via son \texttt{ant\_id}.
+    \item Utiliser un algorithme de recherche de chemin optimal sur la grille complète.
+    \item Laisser une trace de phéromones pour éventuellement guider d'autres fourmis.
+\end{itemize}
+
+\noindent Décrivez brièvement votre implémentation : algorithme de recherche de chemin utilisé, logique de sélection de cible, gestion des phéromones. Si vous avez utilisé un outil d'IA générative, précisez l'outil ainsi que les prompts employés.
+
+\begin{answers}[8cm]
+% Votre réponse ici
+\end{answers}
+
+\subsection*{Graphiques}
+
+\noindent En utilisant votre script \texttt{cheater\_sweep.py} sur l'environnement \texttt{05\_square\_four\_food\_spots}, générez les trois graphiques suivants en fonction du pourcentage de cheaters (de 0\% à 100\%, pas de 10\%, 10 runs par point). La colonie est mixte : les fourmis non-cheaters utilisent \texttt{smart.py}.
+
+\begin{figure}[h!]
+    \centering
+    % Replace with: \includegraphics[width=\linewidth]{figures/q1_steps.pdf}
+    \figplaceholder{14}{6}{Steps pour atteindre l'objectif (75\% collectée, 33\% rapportée à la colonie)\\ en fonction du \% de cheaters (moyenne $\pm$ écart-type)}
+    \caption{Nombre de steps nécessaires pour atteindre l'objectif (75\% collectée, 33\% rapportée à la colonie) en fonction du pourcentage de cheaters.}
+    \label{fig:q1_steps}
+\end{figure}
+
+\begin{figure}[h!]
+    \centering
+    % Replace with: \includegraphics[width=\linewidth]{figures/q1_time.pdf}
+    \figplaceholder{14}{6}{Temps d'exécution réel (secondes) pour atteindre l'objectif (75\% collectée, 33\% rapportée à la colonie)\\ en fonction du \% de cheaters (moyenne $\pm$ écart-type)}
+    \caption{Temps d'exécution réel (en secondes) pour atteindre l'objectif atteint (75\% collectée, 33\% rapportée à la colonie) en fonction du pourcentage de cheaters.}
+    \label{fig:q1_time}
+\end{figure}
+
+\begin{figure}[h!]
+    \centering
+    % Replace with: \includegraphics[width=\linewidth]{figures/q1_throughput.pdf}
+    \figplaceholder{14}{6}{Throughput (steps/seconde)\\ en fonction du \% de cheaters (moyenne $\pm$ écart-type)}
+    \caption{Throughput (steps/seconde) en fonction du pourcentage de cheaters.}
+    \label{fig:q1_throughput}
+\end{figure}
+
+\subsection*{Analyse}
+
+\noindent Analysez les tendances observées sur chaque graphique : quelle proportion de cheaters semble optimale, et comment l'expliquer ? Appuyez-vous explicitement sur les mesures statistiques (moyenne, écart-type) des distributions pour argumenter votre réponse.
+
+\begin{answers}[10cm]
+% Votre réponse ici
+\end{answers}
+
+\newpage
+
+
+
+\end{document}

@@ -1,0 +1,22 @@
+DIMENSIONS:
+10 1
+
+# Colony in bottom-left corner
+COLONY:
+0 0
+
+# Food source 10 steps away
+FOOD:
+9 0 10
+
+# Number of ants to spawn
+ANTS:
+5
+
+# Time limit in seconds (0 = no limit)
+TIME_LIMIT:
+1
+
+# Maximum simulation steps (0 = no limit)
+MAX_STEPS:
+300

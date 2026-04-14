@@ -1,0 +1,26 @@
+DIMENSIONS:
+35 35
+
+# Colony in bottom-left corner
+COLONY:
+2 2
+
+FOOD:
+34 0 5
+34 1 5
+33 0 5
+33 1 5
+34 34 5
+33 34 5
+34 33 5
+33 33 5
+
+# Number of ants to spawn
+ANTS:
+25
+
+MAX_STEPS:
+2000
+
+TIME_LIMIT:
+30
