@@ -1,27 +1,260 @@
-from environment import TerrainType, AntPerception
-from ant import AntAction, AntStrategy
-
+import math
 import random
 
+from ant import AntAction, AntStrategy
+from common import Direction, TerrainType
+from environment import AntPerception
+
+
+def current_terrain(perception):
+    return perception.visible_cells.get((0, 0))
+
+
+def relative_for_direction(direction):
+    return Direction.get_delta(direction)
+
+
+def is_blocked(perception, direction=None):
+    direction = direction or perception.direction
+    dx, dy = relative_for_direction(direction)
+    terrain = perception.visible_cells.get((dx, dy))
+    # A missing adjacent cell is treated as a border wall by this strategy.
+    return terrain is None or terrain == TerrainType.WALL
+
+
+def turn_towards(perception, target_direction):
+    if target_direction is None:
+        return random_safe_move(perception)
+
+    current = perception.direction.value
+    target = target_direction.value if isinstance(target_direction, Direction) else target_direction
+    clockwise = (target - current) % 8
+
+    if clockwise == 0:
+        if not is_blocked(perception):
+            return AntAction.MOVE_FORWARD
+        return random.choice([AntAction.TURN_LEFT, AntAction.TURN_RIGHT])
+
+    if clockwise <= 4:
+        return AntAction.TURN_RIGHT
+    return AntAction.TURN_LEFT
+
+
+def direction_to_closest(perception, terrain_type):
+    best_direction = None
+    best_distance = float("inf")
+
+    for (dx, dy), cell in perception.visible_cells.items():
+        if cell != terrain_type or (dx, dy) == (0, 0):
+            continue
+
+        distance = math.hypot(dx, dy)
+        if distance < best_distance:
+            best_distance = distance
+            best_direction = direction_from_delta(dx, dy)
+
+    return best_direction
+
+
+def strongest_pheromone_direction(perception, pheromone_map, avoid_terrain=None):
+    best_direction = None
+    best_score = 0.0
+    avoid_terrain = avoid_terrain or set()
+
+    for (dx, dy), value in pheromone_map.items():
+        if value <= 0 or (dx, dy) == (0, 0):
+            continue
+
+        terrain = perception.visible_cells.get((dx, dy))
+        if terrain in avoid_terrain:
+            continue
+
+        distance = max(1.0, math.hypot(dx, dy))
+        score = value / distance
+        if score > best_score:
+            best_score = score
+            best_direction = direction_from_delta(dx, dy)
+
+    return best_direction
+
+
+def random_safe_move(perception, forward_bias=0.55):
+    if not is_blocked(perception) and random.random() < forward_bias:
+        return AntAction.MOVE_FORWARD
+    return random.choice([AntAction.TURN_LEFT, AntAction.TURN_RIGHT])
+
+
+def open_direction(perception, preferred_direction=None):
+    candidates = []
+
+    for direction in Direction:
+        dx, dy = relative_for_direction(direction)
+        terrain = perception.visible_cells.get((dx, dy))
+        if terrain is None or terrain == TerrainType.WALL:
+            continue
+
+        score = random.random()
+        if direction == preferred_direction:
+            score += 1.0
+        if direction == perception.direction:
+            score += 0.3
+        candidates.append((score, direction))
+
+    if not candidates:
+        return None
+
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def exploration_direction(perception, memory=None):
+    candidates = []
+    visited = memory or set()
+
+    for direction in Direction:
+        dx, dy = relative_for_direction(direction)
+        terrain = perception.visible_cells.get((dx, dy))
+        if terrain is None or terrain == TerrainType.WALL:
+            continue
+
+        score = random.random()
+        if (dx, dy) not in visited and direction.value not in visited:
+            score += 0.8
+        if direction == perception.direction:
+            score += 0.4
+        candidates.append((score, direction))
+
+    if not candidates:
+        return None
+
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def direction_from_delta(dx, dy):
+    step_x = 0 if dx == 0 else (1 if dx > 0 else -1)
+    step_y = 0 if dy == 0 else (1 if dy > 0 else -1)
+
+    mapping = {
+        (0, -1): Direction.NORTH,
+        (1, -1): Direction.NORTHEAST,
+        (1, 0): Direction.EAST,
+        (1, 1): Direction.SOUTHEAST,
+        (0, 1): Direction.SOUTH,
+        (-1, 1): Direction.SOUTHWEST,
+        (-1, 0): Direction.WEST,
+        (-1, -1): Direction.NORTHWEST,
+    }
+    return mapping.get((step_x, step_y), Direction.NORTH)
+
+
 class CooperativeStrategy(AntStrategy):
-    """
-    # TODO: Insert your code here
-    """
+    """Cooperative foraging using pheromones and local perception only."""
 
     def __init__(self):
-        """Initialize the strategy with last action tracking"""
-        # TODO: Insert your code here
+        self.deposit_interval = 5
+        self.wall_escape_turns = {}
 
     def decide_action(self, perception: AntPerception) -> AntAction:
-        """Decide an action based on current perception"""
+        terrain = current_terrain(perception)
 
-        # TODO: Insert your code here
-        
+        if not perception.has_food and terrain == TerrainType.FOOD:
+            return AntAction.PICK_UP_FOOD
+
+        if perception.has_food and terrain == TerrainType.COLONY:
+            return AntAction.DROP_FOOD
+
+        direct_action = self._direct_target_action(perception)
+        if direct_action is not None:
+            return direct_action
+
+        if self._should_deposit(perception):
+            if perception.has_food:
+                return AntAction.DEPOSIT_FOOD_PHEROMONE
+            return AntAction.DEPOSIT_HOME_PHEROMONE
+
         return self._decide_movement(perception)
 
-    def _decide_movement(self, perception: AntPerception) -> AntAction:
-        """Decide which direction to move based on current state"""
-        # TODO: Insert your code here
+    def _direct_target_action(self, perception: AntPerception) -> AntAction | None:
+        if perception.has_food:
+            colony_direction = direction_to_closest(perception, TerrainType.COLONY)
+            if colony_direction is not None:
+                return turn_towards(perception, colony_direction)
+        else:
+            food_direction = direction_to_closest(perception, TerrainType.FOOD)
+            if food_direction is not None:
+                return turn_towards(perception, food_direction)
+        return None
 
-        random_direction = random.choice([AntAction.MOVE_FORWARD, AntAction.TURN_LEFT, AntAction.TURN_RIGHT])
-        return random_direction  # Random movement for now, replace with actual logic
+    def _decide_movement(self, perception: AntPerception) -> AntAction:
+        if perception.has_food:
+            home_direction = strongest_pheromone_direction(
+                perception,
+                perception.home_pheromone,
+                avoid_terrain={TerrainType.WALL},
+            )
+            if home_direction is not None:
+                return self._move_or_escape(perception, home_direction)
+
+            return_direction = self._sector_direction(perception, returning=True)
+            if return_direction is not None:
+                return self._move_or_escape(perception, return_direction)
+        else:
+            food_trail_direction = strongest_pheromone_direction(
+                perception,
+                perception.food_pheromone,
+                avoid_terrain={TerrainType.WALL},
+            )
+            if food_trail_direction is not None:
+                return self._move_or_escape(perception, food_trail_direction)
+
+            sector_direction = self._sector_direction(perception, returning=False)
+            if sector_direction is not None:
+                return self._move_or_escape(perception, sector_direction)
+
+        return turn_towards(perception, exploration_direction(perception))
+
+    def _should_deposit(self, perception: AntPerception) -> bool:
+        if perception.steps_taken <= 1:
+            return False
+        ant_offset = perception.ant_id or 0
+        return (perception.steps_taken + ant_offset) % self.deposit_interval == 0
+
+    def _move_or_escape(self, perception: AntPerception, direction) -> AntAction:
+        if is_blocked(perception) or is_blocked(perception, direction):
+            return self._wall_escape_action(perception, preferred_direction=direction)
+        return turn_towards(perception, direction)
+
+    def _wall_escape_action(self, perception: AntPerception, preferred_direction=None) -> AntAction:
+        ant_id = perception.ant_id
+        if ant_id is not None and self.wall_escape_turns.get(ant_id):
+            turns_left, action = self.wall_escape_turns[ant_id]
+            if turns_left <= 1:
+                del self.wall_escape_turns[ant_id]
+            else:
+                self.wall_escape_turns[ant_id] = (turns_left - 1, action)
+            return action
+
+        direction = open_direction(perception, preferred_direction=preferred_direction)
+        if direction is not None:
+            return turn_towards(perception, direction)
+
+        action = random.choice([AntAction.TURN_LEFT, AntAction.TURN_RIGHT])
+        if ant_id is not None:
+            self.wall_escape_turns[ant_id] = (random.randint(2, 4), action)
+        return action
+
+    def _sector_direction(self, perception: AntPerception, returning=False):
+        ant_id = perception.ant_id or 1
+        sectors = [
+            (1, -1),
+            (-1, -1),
+            (1, 1),
+            (-1, 1),
+            (1, 0),
+            (0, 1),
+            (-1, 0),
+            (0, -1),
+        ]
+        dx, dy = sectors[ant_id % len(sectors)]
+        if returning:
+            dx, dy = -dx, -dy
+        return direction_from_delta(dx, dy)
