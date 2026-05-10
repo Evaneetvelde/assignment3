@@ -32,6 +32,7 @@ def run_one(
     env_path: Path,
     ants: int,
     strategy: str,
+    strategy_file: Path | None,
     max_steps: int,
     time_limit: float,
     seed: int,
@@ -46,7 +47,13 @@ def run_one(
         env.home_pheromones.evaporation_rate = evaporation_rate
         env.food_pheromones.evaporation_rate = evaporation_rate
 
-    add_ants(env, strategy, strategy_file=None, count=ants, verbose=False)
+    add_ants(
+        env,
+        strategy,
+        strategy_file=str(strategy_file) if strategy_file else None,
+        count=ants,
+        verbose=False,
+    )
 
     runner = SimulationRunner(
         env,
@@ -96,6 +103,11 @@ def write_csv(path: Path, rows: Iterable[dict]) -> None:
         writer.writerows(rows)
 
 
+def read_csv(path: Path) -> list[dict]:
+    with path.open(newline="", encoding="utf-8") as file:
+        return list(csv.DictReader(file))
+
+
 def plot_errorbar(
     summary: list[dict],
     x_key: str,
@@ -129,6 +141,7 @@ def run_sweep(
     env_path: Path,
     runs: int,
     strategy: str,
+    strategy_file: Path | None,
     max_steps: int,
     time_limit: float,
     seed_base: int,
@@ -142,6 +155,7 @@ def run_sweep(
             result = run_one(
                 env_path=env_path,
                 strategy=strategy,
+                strategy_file=strategy_file,
                 max_steps=max_steps,
                 time_limit=time_limit,
                 seed=seed,
@@ -174,17 +188,26 @@ def copy_alias(source: Path, destination: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate assignment Q1/Q2 sweep plots and CSV data."
+        description=(
+            "Generate the plots expected by report_template/Report.tex: "
+            "Q1 ant-count figures and Q2 evaporation figure."
+        )
     )
     parser.add_argument("--env", type=Path, default=DEFAULT_ENV)
     parser.add_argument("--out-dir", type=Path, default=Path("report_template") / "figures")
     parser.add_argument("--data-dir", type=Path, default=Path("results"))
     parser.add_argument("--strategy", default="smart")
+    parser.add_argument(
+        "--strategy-file",
+        type=Path,
+        default=None,
+        help="Optional strategy file to load instead of the built-in strategy name.",
+    )
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument(
         "--questions",
         default="q1,q2",
-        help="Comma-separated subset: q1,q2",
+        help="Comma-separated subset of report questions: q1,q2",
     )
     parser.add_argument(
         "--ant-counts",
@@ -200,6 +223,11 @@ def main() -> None:
         action="store_true",
         help="Do not write the filenames used directly in the provided Report.tex comments.",
     )
+    parser.add_argument(
+        "--plot-only",
+        action="store_true",
+        help="Read existing summary CSV files and generate figures without running simulations.",
+    )
     args = parser.parse_args()
 
     questions = {part.strip().lower() for part in args.questions.split(",")}
@@ -208,22 +236,27 @@ def main() -> None:
 
     if "q1" in questions:
         ant_counts = parse_int_list(args.ant_counts)
-        raw, summary = run_sweep(
-            values=ant_counts,
-            raw_key="ants",
-            env_path=args.env,
-            runs=args.runs,
-            strategy=args.strategy,
-            max_steps=args.max_steps,
-            time_limit=args.time_limit,
-            seed_base=args.seed,
-            configure=lambda ants: {"ants": int(ants)},
-        )
-        write_csv(args.data_dir / "q1_ant_count_raw.csv", raw)
-        write_csv(args.data_dir / "q1_ant_count_summary.csv", summary)
+        summary_path = args.data_dir / "q1_ant_count_summary.csv"
+        if args.plot_only:
+            summary = read_csv(summary_path)
+        else:
+            raw, summary = run_sweep(
+                values=ant_counts,
+                raw_key="ants",
+                env_path=args.env,
+                runs=args.runs,
+                strategy=args.strategy,
+                strategy_file=args.strategy_file,
+                max_steps=args.max_steps,
+                time_limit=args.time_limit,
+                seed_base=args.seed,
+                configure=lambda ants: {"ants": int(ants)},
+            )
+            write_csv(args.data_dir / "q1_ant_count_raw.csv", raw)
+            write_csv(summary_path, summary)
 
-        steps_path = args.out_dir / "q1_ant_count_steps.pdf"
-        time_path = args.out_dir / "q1_ant_count_time.pdf"
+        steps_path = args.out_dir / "q4_ant_count_steps.pdf"
+        time_path = args.out_dir / "q4_ant_count_time.pdf"
         plot_errorbar(
             summary,
             x_key="ants",
@@ -231,7 +264,7 @@ def main() -> None:
             yerr_key="steps_std",
             xlabel="Number of ants",
             ylabel="Steps to objective",
-            title="Q1 - Steps vs number of ants",
+            title="Report Q1 - Steps vs number of ants",
             path=steps_path,
         )
         plot_errorbar(
@@ -241,30 +274,35 @@ def main() -> None:
             yerr_key="time_std",
             xlabel="Number of ants",
             ylabel="Runtime (seconds)",
-            title="Q1 - Runtime vs number of ants",
+            title="Report Q1 - Runtime vs number of ants",
             path=time_path,
         )
         if not args.no_template_aliases:
-            copy_alias(steps_path, args.out_dir / "q4_ant_count_steps.pdf")
-            copy_alias(time_path, args.out_dir / "q4_ant_count_time.pdf")
+            copy_alias(steps_path, args.out_dir / "q1_ant_count_steps.pdf")
+            copy_alias(time_path, args.out_dir / "q1_ant_count_time.pdf")
 
     if "q2" in questions:
         evaporation_rates = regular_values(0.500, 0.999, args.evaporation_points)
-        raw, summary = run_sweep(
-            values=evaporation_rates,
-            raw_key="evaporation_rate",
-            env_path=args.env,
-            runs=args.runs,
-            strategy=args.strategy,
-            max_steps=args.max_steps,
-            time_limit=args.time_limit,
-            seed_base=args.seed + 100000,
-            configure=lambda rate: {"ants": 70, "evaporation_rate": float(rate)},
-        )
-        write_csv(args.data_dir / "q2_evaporation_raw.csv", raw)
-        write_csv(args.data_dir / "q2_evaporation_summary.csv", summary)
+        summary_path = args.data_dir / "q2_evaporation_summary.csv"
+        if args.plot_only:
+            summary = read_csv(summary_path)
+        else:
+            raw, summary = run_sweep(
+                values=evaporation_rates,
+                raw_key="evaporation_rate",
+                env_path=args.env,
+                runs=args.runs,
+                strategy=args.strategy,
+                strategy_file=args.strategy_file,
+                max_steps=args.max_steps,
+                time_limit=args.time_limit,
+                seed_base=args.seed + 100000,
+                configure=lambda rate: {"ants": 70, "evaporation_rate": float(rate)},
+            )
+            write_csv(args.data_dir / "q2_evaporation_raw.csv", raw)
+            write_csv(summary_path, summary)
 
-        evaporation_path = args.out_dir / "q2_evaporation.pdf"
+        evaporation_path = args.out_dir / "q3_evaporation.pdf"
         plot_errorbar(
             summary,
             x_key="evaporation_rate",
@@ -272,11 +310,11 @@ def main() -> None:
             yerr_key="steps_std",
             xlabel="Pheromone evaporation rate",
             ylabel="Steps to objective",
-            title="Q2 - Steps vs pheromone evaporation rate",
+            title="Report Q2 - Steps vs pheromone evaporation rate",
             path=evaporation_path,
         )
         if not args.no_template_aliases:
-            copy_alias(evaporation_path, args.out_dir / "q3_evaporation.pdf")
+            copy_alias(evaporation_path, args.out_dir / "q2_evaporation.pdf")
 
     print(f"Done. Figures: {args.out_dir}")
     print(f"Done. CSV data: {args.data_dir}")

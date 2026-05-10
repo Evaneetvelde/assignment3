@@ -9,7 +9,7 @@ from environment import AntPerception
 FOOD_PHEROMONE_THRESHOLD = 10.0
 HOME_PHEROMONE_THRESHOLD = 25.0
 FOOD_DEPOSIT_INTERVAL = 3
-HOME_DEPOSIT_INTERVAL = 10
+HOME_DEPOSIT_INTERVAL = 6
 PHEROMONE_FOLLOW_PROBABILITY = 0.75
 FOOD_SEEN_DEPOSIT_INTERVAL = 2
 
@@ -145,7 +145,7 @@ def random_safe_move(perception, forward_bias=0.55):
 
 
 def open_direction(perception, preferred_direction=None):
-    """Pick a walkable direction, biased by preference and forward movement."""
+    """Pick a walkable direction, mostly biased by visible free space."""
     candidates = []
 
     for direction in Direction:
@@ -154,11 +154,12 @@ def open_direction(perception, preferred_direction=None):
         if terrain is None or terrain == TerrainType.WALL:
             continue
 
-        score = random.random()
-        if direction == preferred_direction:
-            score += 1.0
+        score = visible_free_distance(perception, direction, max_steps=4) * 1.2
+        score += random.random() * 0.2
+        if preferred_direction is not None:
+            score -= angular_distance(direction, preferred_direction) * 0.35
         if direction == perception.direction:
-            score += 0.3
+            score += 0.25
         candidates.append((score, direction))
 
     if not candidates:
@@ -333,8 +334,12 @@ class CooperativeStrategy(AntStrategy):
 
     def _move_or_escape(self, perception: AntPerception, direction) -> AntAction:
         """Move toward a direction, or escape locally if it is blocked."""
-        if is_blocked(perception) or is_blocked(perception, direction):
+        if direction is None:
+            return self._wall_escape_action(perception)
+        if is_blocked(perception, direction):
             return self._wall_escape_action(perception, preferred_direction=direction)
+        if is_blocked(perception):
+            return turn_towards(perception, direction)
         return turn_towards(perception, direction)
 
     def _wall_escape_action(self, perception: AntPerception, preferred_direction=None) -> AntAction:

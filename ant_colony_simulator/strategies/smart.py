@@ -7,70 +7,112 @@ from common import Direction, TerrainType
 from environment import AntPerception
 
 
-MAX_PATH_LENGTH = 800
-MAX_KNOWN_CELLS = 1800
-MAX_VISITED_CELLS = 900
-MAX_ASTAR_NODES = 90
-MAX_GATEWAYS = 20
-MAX_PHEROMONE_SPOTS = 30
-RECENT_WINDOW = 26
-STAGNATION_RADIUS = 4
-STAGNATION_UNIQUE_LIMIT = 10
-GATEWAY_SCAN_RADIUS = 7
-GATEWAY_DETECTION_PERIOD = 3
-FRONTIER_LOOKAHEAD = 4
+MAX_ENVIRONMENT_CELLS = 500 * 500
+MAX_PATH_LENGTH = MAX_ENVIRONMENT_CELLS
+MAX_KNOWN_CELLS = MAX_ENVIRONMENT_CELLS
+MAX_VISITED_CELLS = MAX_ENVIRONMENT_CELLS
+MAX_MAP_SEARCH_NODES = MAX_ENVIRONMENT_CELLS
 
+RECENT_WINDOW = 50
+STAGNATION_RADIUS = 8
+STAGNATION_UNIQUE_LIMIT = 5
+FRONTIER_LOOKAHEAD = 3
+EXPLORE_FOOD_STEPS = 10
+EMPTY_FOOD_ESCAPE_STEPS = 14
+EMPTY_FOOD_ESCAPE_RADIUS = 10
+RECENT_REVISIT_PENALTY = 0.65
+SEEN_EMPTY_VISIT_WEIGHT = 1
+EXPLORATION_AWAY_FROM_COLONY_WEIGHT = 0.85
+EXPLORATION_MODE_PERIOD = 80
+LOCAL_WALL_CONTACT_PENALTY = 0.9
+RETURN_SUBSTATE_RESET_STEPS = 150
+RETURN_HOME_PHEROMONE_RESET_STEPS = 25
+FOOD_PHEROMONE_THRESHOLD = 8.0
+HOME_PHEROMONE_THRESHOLD = 10.0
+FOOD_PHEROMONE_FOLLOW_STEPS = 80
+FOOD_PHEROMONE_DEPOSIT_INTERVAL = 3
+HOME_PHEROMONE_DEPOSIT_INTERVAL = 3
+HOME_PHEROMONE_EXPLORED_RADIUS = 4
+HOME_PHEROMONE_EXPLORED_WEIGHT = 2.0
+SHARED_EXPLORED_LOOKAHEAD = 3
+SHARED_EXPLORED_MAX_CELLS = MAX_ENVIRONMENT_CELLS
+
+STATE_INIT = "init"
+STATE_EXPLORING = "exploring"
+STATE_COLLECTING = "collecting"
+STATE_RETURNING = "returning"
+STATE_FOLLOW_FOOD_TO_FOOD = "follow_food_to_food"
+STATE_EXPLORE_FOOD = "explore_food"
+STATE_FOLLOW_WALL = "follow_wall"
+STATE_FOLLOW_FOOD_PHEM = "follow_food_phem"
+
+RETURN_SUBSTATE_BLOCKED = "blocked"
+RETURN_SUBSTATE_STAGNATING = "stagnating"
+RETURN_SUBSTATE_FOLLOW_PATH = "follow_food_to_colony"
+RETURN_TROUBLE_SUBSTATES = {
+    RETURN_SUBSTATE_BLOCKED,
+    RETURN_SUBSTATE_STAGNATING,
+    RETURN_SUBSTATE_FOLLOW_PATH,
+}
+
+EXPLORATION_LOCAL = "local"
+EXPLORATION_FAR = "far"
 ROLE_CARRIER = "carrier"
 ROLE_EXPLORER = "explorer"
 
+DIRECTION_BY_STEP = {
+    (0, -1): Direction.NORTH,
+    (1, -1): Direction.NORTHEAST,
+    (1, 0): Direction.EAST,
+    (1, 1): Direction.SOUTHEAST,
+    (0, 1): Direction.SOUTH,
+    (-1, 1): Direction.SOUTHWEST,
+    (-1, 0): Direction.WEST,
+    (-1, -1): Direction.NORTHWEST,
+}
+
 
 def current_terrain(perception):
-    """Return the terrain under the ant."""
     return perception.visible_cells.get((0, 0))
 
 
-def delta(direction):
-    """Return the one-cell delta for a Direction."""
-    return Direction.get_delta(direction)
+def as_direction(direction):
+    if direction is None or isinstance(direction, Direction):
+        return direction
+    return Direction(direction)
+
+
+def direction_from_vector(dx, dy):
+    step_x = 0 if dx == 0 else (1 if dx > 0 else -1)
+    step_y = 0 if dy == 0 else (1 if dy > 0 else -1)
+    return DIRECTION_BY_STEP.get((step_x, step_y), Direction.NORTH)
 
 
 def is_blocked(perception, direction=None):
-    """Treat walls and unseen grid borders as blocked."""
-    direction = direction or perception.direction
-    dx, dy = delta(direction)
+    dx, dy = Direction.get_delta(as_direction(direction) or perception.direction)
     terrain = perception.visible_cells.get((dx, dy))
     return terrain is None or terrain == TerrainType.WALL
 
 
-def direction_from_delta(dx, dy):
-    """Convert a vector into one of the eight movement directions."""
-    step_x = 0 if dx == 0 else (1 if dx > 0 else -1)
-    step_y = 0 if dy == 0 else (1 if dy > 0 else -1)
-    mapping = {
-        (0, -1): Direction.NORTH,
-        (1, -1): Direction.NORTHEAST,
-        (1, 0): Direction.EAST,
-        (1, 1): Direction.SOUTHEAST,
-        (0, 1): Direction.SOUTH,
-        (-1, 1): Direction.SOUTHWEST,
-        (-1, 0): Direction.WEST,
-        (-1, -1): Direction.NORTHWEST,
-    }
-    return mapping.get((step_x, step_y), Direction.NORTH)
-
-
 def angular_distance(direction, target):
-    """Return turn distance on the eight-direction ring."""
+    direction = as_direction(direction)
+    target = as_direction(target)
+    if direction is None or target is None:
+        return 4
     diff = abs(direction.value - target.value) % 8
     return min(diff, 8 - diff)
 
 
-def turn_towards(perception, target):
-    """Turn toward a target direction, or move when already aligned."""
-    if target is None:
+def random_turn():
+    return random.choice([AntAction.TURN_LEFT, AntAction.TURN_RIGHT])
+
+
+def selectmove(perception, target_direction):
+    target_direction = as_direction(target_direction)
+    if target_direction is None:
         return random_turn()
 
-    clockwise = (target.value - perception.direction.value) % 8
+    clockwise = (target_direction.value - perception.direction.value) % 8
     if clockwise == 0:
         return AntAction.MOVE_FORWARD if not is_blocked(perception) else random_turn()
     if clockwise == 4:
@@ -78,405 +120,462 @@ def turn_towards(perception, target):
     return AntAction.TURN_RIGHT if clockwise <= 4 else AntAction.TURN_LEFT
 
 
-def random_turn():
-    """Pick a random turn."""
-    return random.choice([AntAction.TURN_LEFT, AntAction.TURN_RIGHT])
-
-
-def direction_to_closest(perception, terrain_type):
-    """Return the direction to the closest visible terrain of a given type."""
-    best_direction = None
-    best_distance = float("inf")
-    for (dx, dy), terrain in perception.visible_cells.items():
-        if terrain != terrain_type or (dx, dy) == (0, 0):
-            continue
-        distance = math.hypot(dx, dy)
-        if distance < best_distance:
-            best_distance = distance
-            best_direction = direction_from_delta(dx, dy)
-    return best_direction
-
-
-def distance_to_closest(perception, terrain_type):
-    """Return the distance to the closest visible terrain of a given type."""
-    best_distance = float("inf")
-    for (dx, dy), terrain in perception.visible_cells.items():
-        if terrain == terrain_type and (dx, dy) != (0, 0):
-            best_distance = min(best_distance, math.hypot(dx, dy))
-    return best_distance
-
-
-def open_directions(perception):
-    """List immediate non-blocked directions."""
-    return [direction for direction in Direction if not is_blocked(perception, direction)]
-
-
-def visible_free_distance(perception, direction, max_steps=7):
-    """Count visible free cells in a straight line."""
-    dx, dy = delta(direction)
-    count = 0
+def visible_free_distance(perception, direction, max_steps=8):
+    dx, dy = Direction.get_delta(direction)
+    distance = 0
     for step in range(1, max_steps + 1):
         terrain = perception.visible_cells.get((dx * step, dy * step))
         if terrain is None or terrain == TerrainType.WALL:
             break
-        count += 1
-    return count
+        distance += 1
+    return distance
+
+
+def open_directions(perception):
+    return [direction for direction in Direction if not is_blocked(perception, direction)]
 
 
 class SmartStrategy(AntStrategy):
-    """Smart role strategy: 10% carriers near colony, 90% far explorers."""
+    """Role-aware memory strategy based on the non-cooperative state machine."""
 
     def __init__(self):
+        self.states = {}
+        self.substates = {}
+
         self.positions = {}
         self.last_actions = {}
         self.outbound_paths = {}
         self.return_paths = {}
-        self.food_paths = {}
-        self.food_path_indices = {}
+
         self.food_memory = {}
-        self.last_food_taken = {}
+        self.food_colony_paths = {}
+        self.stable_food_colony_paths = {}
+        self.colony_food_paths = {}
+        self.stable_colony_food_paths = {}
 
         self.known_maps = {}
         self.visit_counts = {}
         self.recent_positions = {}
-        self.gateways = {}
-        self.exhausted_zones = {}
         self.avoid_zones = {}
-        self.pheromone_spots = {}
+        self.shared_explored_cells = {}
 
-        self.carrying_steps = {}
-        self.gateway_marking_steps = {}
-        self.gateway_marking_targets = {}
-        self.gateway_probes = {}
-        self.gateway_searches = {}
+        self.food_explore_steps = {}
+        self.food_search_targets = {}
+        self.empty_food_escape_steps = {}
+        self.empty_food_escape_targets = {}
+        self.food_pheromone_follow_steps = {}
+        self.return_reset_steps = {}
+        self.return_home_pheromone_steps = {}
 
-    def decide_action(self, perception: AntPerception) -> AntAction:
-        """Update personal memory and execute the role-aware priority stack."""
-        self._update_position(perception)
-        self._update_known_map(perception)
-        self._update_pheromone_spots(perception)
-        self._remember_exploration_state(perception)
-        self._update_carrying_state(perception)
-        self._clear_depleted_food_memory(perception)
+        self.seen_ants = set()
+        self.initial_direction_counts = {}
+        self.sidestep_plans = {}
 
-        terrain = current_terrain(perception)
-        if not perception.has_food and terrain == TerrainType.FOOD:
-            self._remember_food(perception)
-            return self._remember_action(perception, AntAction.PICK_UP_FOOD)
+    def _state(self, ant_id):
+        return self.states.get(ant_id, STATE_INIT)
 
-        if perception.has_food and terrain == TerrainType.COLONY:
-            self._reset_after_drop(perception)
-            return self._remember_action(perception, AntAction.DROP_FOOD)
+    def _set_state(self, ant_id, state):
+        if ant_id is not None:
+            self.states[ant_id] = state
 
-        action = self._carry_food(perception) if perception.has_food else self._search_food(perception)
-        return self._remember_action(perception, action)
+    def _substate(self, ant_id):
+        return self.substates.get(ant_id)
+
+    def _set_substate(self, ant_id, substate):
+        if ant_id is None:
+            return
+        if substate is None:
+            self.substates.pop(ant_id, None)
+        else:
+            self.substates[ant_id] = substate
 
     def _role(self, ant_id):
-        """Assign 1/10 carrier, 9/10 explorer."""
         return ROLE_CARRIER if (ant_id or 0) % 10 == 0 else ROLE_EXPLORER
 
-    def _carry_food(self, perception):
-        """Bring food home with no exploration randomness."""
-        colony = direction_to_closest(perception, TerrainType.COLONY)
-        if colony is not None:
-            return turn_towards(perception, colony)
+    def decide_action(self, perception: AntPerception) -> AntAction:
+        """
+        Machine à état principale
+        """
+        ant_id = perception.ant_id
+        self._update_position(perception)
+        self._remember_exploration_state(perception)
+        self._update_known_map(perception)
+        self._remember_home_pheromone_exploration(perception)
 
-        route_direction = None
-        mapped_home = self._mapped_direction_to(perception.ant_id, (0, 0))
-        if mapped_home is not None:
-            if not is_blocked(perception, mapped_home):
-                route_direction = mapped_home
+        state = self._state(ant_id)
+        action = AntAction.MOVE_FORWARD  
 
-            else:
-                join_reverse = self._direction_to_reverse_path(perception)
-                if join_reverse is not None:
-                    route_direction = join_reverse
+        if perception.has_food:
+            action = self._run_returning(perception)
+        elif state == STATE_COLLECTING:
+            action = self._run_collecting(perception)
+        elif perception.can_see_food():
+            self._set_state(ant_id, STATE_COLLECTING)
+            action = self._run_collecting(perception)
+        elif state == STATE_FOLLOW_FOOD_TO_FOOD:
+            action = self._run_follow_food_to_food(perception)
+        elif state == STATE_EXPLORE_FOOD:
+            action = self._run_explore_food(perception)
+        elif state == STATE_FOLLOW_FOOD_PHEM:
+            action = self._run_follow_food_phem(perception)
+        elif self._should_start_food_pheromone_follow(perception):
+            self._set_state(ant_id, STATE_FOLLOW_FOOD_PHEM)
+            action = self._run_follow_food_phem(perception)
+        elif self._is_escaping_empty_food(perception):
+            action = self._run_empty_food_escape(perception)
+        elif state == STATE_INIT:
+            action = self._run_init(perception)
+        elif state in {STATE_EXPLORING, STATE_FOLLOW_WALL}:
+            action = self._run_explo_mode(perception)
+        else:
+            self._set_state(ant_id, STATE_EXPLORING)
+            action = self._run_exploring(perception)
+        return self._remember_action(perception, action)
 
-        if route_direction is None:
-            route_direction = self._return_path_direction(perception)
+    def _run_explo_mode(self, perception):
+        """
+        Décide de la routine d'exploration
+        """
+        state=self._state(perception.ant_id)
+        if state==STATE_FOLLOW_WALL:
+            return self._run_follow_wall(perception)
+        elif state==STATE_EXPLORING:
+            if self._role(perception.ant_id) == ROLE_CARRIER:
+                return self._run_carrier_exploring(perception)
+            return self._run_exploring(perception)
 
-        if route_direction is None:
-            route_direction = self._home_direction(perception)
+    def _run_returning(self, perception):
+        """
+        Routine de retour à la colonie, avec détection de blocage et stagnation
+        """
+        ant_id = perception.ant_id
+        self.update_food_colony_paths(perception)
 
-        if self._should_deposit_food(perception) and self._should_mark_food_return(perception, route_direction):
+        if current_terrain(perception) == TerrainType.COLONY:
+            self._set_substate(ant_id, None)
+            self._set_state(ant_id, STATE_FOLLOW_FOOD_TO_FOOD)
+            if ant_id is not None:
+                self._promote_successful_return_path(ant_id)
+                self._clear_return_reset_state(ant_id)
+                self.return_home_pheromone_steps.pop(ant_id, None)
+                self._clear_pheromone_memory(ant_id, "food")
+                self.food_pheromone_follow_steps.pop(ant_id, None)
+                self.outbound_paths[ant_id] = [self.positions.get(ant_id, (0, 0))]
+            return AntAction.DROP_FOOD
+
+        reset_return_substate = self._maybe_reset_return_substate(perception)
+        if perception.can_see_colony():
+            return selectmove(perception, perception.get_colony_direction())
+
+        home_direction = self._home_direction(perception)
+        if is_blocked(perception) :
+            self._set_substate(ant_id, RETURN_SUBSTATE_BLOCKED)
+        elif self.is_stagnating(perception):
+            self._set_substate(ant_id, RETURN_SUBSTATE_STAGNATING)
+
+        if self._substate(ant_id) in RETURN_TROUBLE_SUBSTATES:
+            home_pheromone_action = self._return_home_pheromone_action(perception)
+            if home_pheromone_action is not None:
+                return home_pheromone_action
+            food_pheromone = self._food_pheromone_colony_direction(perception)
+            if food_pheromone is not None:
+                if self._should_deposit_food_pheromone(perception):
+                    return AntAction.DEPOSIT_FOOD_PHEROMONE
+                return selectmove(perception, food_pheromone)
+            if reset_return_substate:
+                return selectmove(perception, home_direction)
+            direction = (
+                self.follow_food_to_colony(perception)
+                or self.merge_to_old_foodpath(perception)
+                or home_direction
+            )
+            return selectmove(perception, direction)
+
+        self.return_home_pheromone_steps.pop(ant_id, None)
+        if self._should_deposit_food_pheromone(perception):
             return AntAction.DEPOSIT_FOOD_PHEROMONE
+        if reset_return_substate:
+            return selectmove(perception, home_direction)
 
-        return self._move_home_or_turn(perception, route_direction)
+        direction = home_direction or self.follow_food_to_colony(perception) or self.merge_to_old_foodpath(perception)
+        return selectmove(perception, direction)
 
-    def _search_food(self, perception):
-        """Priority: visible food, known food path, pheromone path, gateway marking, role, exploration."""
-        visible_food = direction_to_closest(perception, TerrainType.FOOD)
-        if visible_food is not None:
-            return turn_towards(perception, visible_food)
+    def _run_collecting(self, perception):
+        """
+        Routine de collect de nourriture
+        """
+        ant_id = perception.ant_id
+        self.update_colony_food_paths(perception)
+        if current_terrain(perception) == TerrainType.FOOD:
+            self._set_state(ant_id, STATE_RETURNING)
+            self._remember_food(perception)
+            return AntAction.PICK_UP_FOOD
+        return selectmove(perception, perception.get_food_direction())
 
-        known_food = self._remembered_food_action(perception)
-        if known_food is not None:
-            return known_food
+    def _run_follow_food_to_food(self, perception):
+        """
+        Routine de suivi de chemin connu pour retourner à la nourriture
+        """
+        if self._remembered_food_is_empty(perception):
+            self._start_explore_food(perception)
+            return self._run_explore_food(perception)
 
-        probe = self._gateway_probe_action(perception)
-        if probe is not None:
-            return probe
+        current = self.positions.get(perception.ant_id, (0, 0))
+        direction = (
+            self.stable_colony_food_paths.get(perception.ant_id, {}).get(current)
+            or self.colony_food_paths.get(perception.ant_id, {}).get(current)
+        )
+        if direction is None or is_blocked(perception, direction):
+            direction = self._known_food_direction(perception)
+        if direction is None:
+            self._set_state(perception.ant_id, STATE_EXPLORING)
+            return self._run_exploring(perception)
+        return selectmove(perception, direction)
 
-        if self._is_marking_gateway(perception):
-            if self._should_deposit_home(perception):
-                return AntAction.DEPOSIT_HOME_PHEROMONE
-            return self._gateway_return_action(perception)
+    def _run_follow_food_phem(self, perception):
+        """
+        Suit une piste de phéromone food si la fourmi n'a pas encore de spot connu.
+        """
+        ant_id = perception.ant_id
+        if ant_id in self.food_memory:
+            self.food_pheromone_follow_steps.pop(ant_id, None)
+            self._set_state(ant_id, STATE_FOLLOW_FOOD_TO_FOOD)
+            return self._run_follow_food_to_food(perception)
+        if perception.can_see_food():
+            self.food_pheromone_follow_steps.pop(ant_id, None)
+            self._set_state(ant_id, STATE_COLLECTING)
+            return self._run_collecting(perception)
 
-        if self._should_deposit_home(perception):
-            return AntAction.DEPOSIT_HOME_PHEROMONE
+        steps = self.food_pheromone_follow_steps.get(ant_id, 0) + 1
+        self.food_pheromone_follow_steps[ant_id] = steps
+        direction = self._food_pheromone_direction(perception)
+        if direction is None or steps > FOOD_PHEROMONE_FOLLOW_STEPS:
+            self.food_pheromone_follow_steps.pop(ant_id, None)
+            self._set_state(ant_id, STATE_EXPLORING)
+            return self._run_exploring(perception)
+        return selectmove(perception, direction)
 
-        food_pheromone = self._pheromone_path_direction(perception, perception.food_pheromone, threshold=8.0)
-        if food_pheromone is not None:
-            return self._move_or_escape(perception, food_pheromone)
+    def _run_explore_food(self, perception):
+        """
+        Routine d'exploration de la nourriture quand ancien spot vide
+        """
+        ant_id = perception.ant_id
+        if perception.can_see_food():
+            self.food_explore_steps.pop(ant_id, None)
+            self.food_search_targets.pop(ant_id, None)
+            self.empty_food_escape_steps.pop(ant_id, None)
+            self.empty_food_escape_targets.pop(ant_id, None)
+            self._set_state(ant_id, STATE_COLLECTING)
+            return self._run_collecting(perception)
 
-        gateway_search = self._gateway_search_action(perception)
-        if gateway_search is not None:
-            return gateway_search
+        steps = self.food_explore_steps.get(ant_id, 0) + 1
+        self.food_explore_steps[ant_id] = steps
+        if steps > EXPLORE_FOOD_STEPS or self._is_food_search_stagnating(perception):
+            current = self.positions.get(ant_id, (0, 0))
+            target = self._active_food_search_target(perception)
+            self._add_zone(self.avoid_zones, ant_id, target, radius=8)
+            self._add_zone(self.avoid_zones, ant_id, current, radius=8)
+            self._discard_colony_food_route(ant_id)
+            self.outbound_paths.pop(ant_id, None)
+            self.food_explore_steps.pop(ant_id, None)
+            self.food_search_targets.pop(ant_id, None)
+            self._start_empty_food_escape(ant_id, target)
+            self._set_state(ant_id, STATE_EXPLORING)
+            return selectmove(perception, self._leave_empty_food_area_direction(perception, target))
 
-        if self._is_stagnating(perception):
-            self._mark_current_area_to_avoid(perception)
-            return self._start_unstuck(perception)
+        direction = self._explore_food_direction(perception)
+        return selectmove(perception, direction)
 
-        home_pheromone = self._home_trail_outward_direction(perception, threshold=12.0)
-        if home_pheromone is not None:
-            return self._move_or_escape(perception, home_pheromone)
-
-        role_direction = self._role_direction(perception)
-        if role_direction is not None:
-            return self._move_or_escape(perception, role_direction)
-
+    def _run_carrier_exploring(self, perception):
+        """
+        Exploration role-aware: carriers patrol around the colony instead of following other ants.
+        """
+        ant_id = perception.ant_id
         if is_blocked(perception):
-            return self._wall_escape_action(perception)
+            self._set_state(ant_id, STATE_EXPLORING)
+            return self._exploration_move(perception, target=self._carrier_patrol_direction(perception))
+        if self.is_stagnating(perception):
+            self._mark_current_area_to_avoid(perception)
+            return selectmove(perception, self._best_unstuck_direction(perception))
+        deposit = self._exploration_home_pheromone_action(perception)
+        if deposit is not None:
+            return deposit
+        return self._exploration_move(perception, target=self._carrier_patrol_direction(perception))
 
-        return self._best_open_action(perception, target=self._exploration_sector(perception), force_exploration=True)
+    def _run_exploring(self, perception):
+        """
+        Routine d'exploration classique, avec détection de blocage et stagnation.
+        """
+        exploration_mode = self._exploration_mode(perception)
+        if is_blocked(perception):
+            self._set_state(
+                perception.ant_id,
+                STATE_FOLLOW_WALL if exploration_mode == EXPLORATION_FAR else STATE_EXPLORING,
+            )
+            return self._exploration_move(perception)
+        if self.is_stagnating(perception):
+            self._mark_current_area_to_avoid(perception)
+            self._set_state(perception.ant_id, STATE_EXPLORING)
+            direction = self._best_unstuck_direction(perception)
+            return selectmove(perception, direction)
+        deposit = self._exploration_home_pheromone_action(perception)
+        if deposit is not None:
+            return deposit
+        return self._exploration_move(perception)
 
-    def _role_direction(self, perception):
-        """Execute role behavior after all food/path priorities."""
-        if self._role(perception.ant_id) == ROLE_CARRIER:
-            return self._carrier_patrol_direction(perception)
+    def _run_follow_wall(self, perception):
+        """
+        Routine de suivi de mur, explo
+        """
+        deposit = self._exploration_home_pheromone_action(perception)
+        if deposit is not None:
+            return deposit
 
-        gateway = self._new_gateway_direction(perception)
-        if gateway is not None:
-            return gateway
+        leave_wall_chance = 0.15 if self._exploration_mode(perception) == EXPLORATION_LOCAL else 0.0
+        if leave_wall_chance and random.random() < leave_wall_chance:
+            self._set_state(perception.ant_id, STATE_EXPLORING)
+            return self._exploration_move(perception)
+
+        directions = open_directions(perception)
+        if not directions:
+            return random_turn()
+        direction = max(directions, key=lambda direction: self._wall_follow_score(perception, direction))
+        if self._direction_repeats_recent_position(perception, direction):
+            direction = self._best_unstuck_direction(perception)
+        return selectmove(perception, direction)
+
+    def _run_init(self, perception):
+        """
+        Va tout droit avec sidestep
+        """
+        ant_id = perception.ant_id
+        if ant_id not in self.seen_ants:
+            self.seen_ants.add(ant_id)
+            self._plan_initial_sidestep(perception)
+
+        sidestep = self._initial_sidestep_action(perception)
+        if sidestep is not None:
+            return sidestep
+        if is_blocked(perception):
+            self._set_state(ant_id, STATE_EXPLORING)
+            return random_turn()
+        deposit = self._exploration_home_pheromone_action(perception)
+        if deposit is not None:
+            return deposit
+        return AntAction.MOVE_FORWARD
+    
+    def deposit_foodphem(self, perception):
+        """
+        Dépose une phéromone de nourriture pour aider les autres fourmis à trouver la nourriture
+        """
+        if self._should_deposit_food_pheromone(perception):
+            return AntAction.DEPOSIT_FOOD_PHEROMONE
+        return None
+    
+    def deposit_colonyphem_routin(self, perception): # nouvelle état
+        """
+        Dépose une phéromone colonie pour marquer une zone explorée.
+        """
+        if self._should_deposit_home_pheromone(perception):
+            return AntAction.DEPOSIT_HOME_PHEROMONE
         return None
 
-    def _carrier_patrol_direction(self, perception):
-        """Keep carriers near colony to catch food pheromone trails early."""
-        x, y = self.positions.get(perception.ant_id, (0, 0))
-        distance = math.hypot(x, y)
-        if distance > 16:
-            return self._home_direction(perception)
-        if distance < 5:
-            return self._exploration_sector(perception, offset=2)
-
-        radial = direction_from_delta(x, y)
-        side = 2 if (perception.ant_id or 0) % 2 == 0 else -2
-        return Direction((radial.value + side) % 8)
-
-    def _should_deposit_food(self, perception):
-        """Create food pheromone paths without freezing carriers."""
-        carried_steps = self.carrying_steps.get(perception.ant_id, 0)
-        if carried_steps == 1:
+    def _should_deposit_food_pheromone(self, perception):
+        if not perception.has_food:
+            return False
+        ant_id = perception.ant_id or 0
+        if perception.steps_taken <= 2:
             return True
-        interval = 3 if self._role(perception.ant_id) == ROLE_CARRIER else 4
-        return carried_steps > 1 and (perception.steps_taken + (perception.ant_id or 0)) % interval == 0
+        return (perception.steps_taken + ant_id) % FOOD_PHEROMONE_DEPOSIT_INTERVAL == 0
 
-    def _should_deposit_food_on_known_path(self, perception):
-        """Mark food trails while returning from colony to a remembered food source."""
-        if perception.has_food:
-            return False
-        if perception.ant_id not in self.food_paths:
-            return False
-        if not self._is_on_direct_food_colony_line(perception):
-            return False
-        return (perception.steps_taken + (perception.ant_id or 0)) % 4 == 0
-
-    def _is_aligned_for_return(self, perception, direction):
-        """Allow marking only once the ant is already facing its return route."""
-        if direction is None:
-            return False
-        return perception.direction == direction and not is_blocked(perception, direction)
-
-    def _is_aligned_for_direct_home(self, perception):
-        """Allow food marking only on the direct food-colony line toward colony."""
-        home = self._home_direction(perception)
-        if home is None:
-            return False
-        return self._is_aligned_for_return(perception, home) and self._is_on_direct_food_colony_line(perception)
-
-    def _should_mark_food_return(self, perception, route_direction):
-        """Mark direct nearby food routes, and any real return route for far food."""
-        if self._is_aligned_for_direct_home(perception):
-            return True
-        if not self._food_source_is_far(perception, minimum_distance=20):
-            return False
-        return self._is_aligned_for_return(perception, route_direction)
-
-    def _food_source_is_far(self, perception, minimum_distance):
-        """Tell whether the last food pickup is far enough from the colony to mark detours."""
-        food = self.last_food_taken.get(perception.ant_id) or self.food_memory.get(perception.ant_id)
-        return food is not None and math.hypot(food[0], food[1]) > minimum_distance
-
-    def _is_on_direct_food_colony_line(self, perception, tolerance=1.6):
-        """Check whether the ant is close to the segment colony-last-food."""
-        food = self.last_food_taken.get(perception.ant_id) or self.food_memory.get(perception.ant_id)
-        if food is None:
-            return False
-
-        current = self.positions.get(perception.ant_id, (0, 0))
-        food_length = math.hypot(food[0], food[1])
-        if food_length == 0:
-            return False
-
-        projection = (current[0] * food[0] + current[1] * food[1]) / (food_length * food_length)
-        if projection < -0.05 or projection > 1.05:
-            return False
-
-        distance_to_line = abs(current[0] * food[1] - current[1] * food[0]) / food_length
-        return distance_to_line <= tolerance
-
-    def _should_deposit_home(self, perception):
-        """Deposit home pheromones only while marking a useful gateway route."""
+    def _should_deposit_home_pheromone(self, perception):
         if perception.has_food or perception.can_see_colony():
             return False
-        if not self._is_marking_gateway(perception):
+        if self._state(perception.ant_id) not in {STATE_INIT, STATE_EXPLORING, STATE_FOLLOW_WALL}:
             return False
-        return (perception.steps_taken + (perception.ant_id or 0)) % 3 == 0
+        return (perception.steps_taken + (perception.ant_id or 0)) % HOME_PHEROMONE_DEPOSIT_INTERVAL == 0
 
-    def _is_marking_gateway(self, perception):
-        """Tell whether an ant is currently returning home after a gateway discovery."""
-        current = self.positions.get(perception.ant_id, (0, 0))
-        if perception.can_see_colony() or math.hypot(*current) <= 2:
-            self.gateway_marking_steps.pop(perception.ant_id, None)
-            self.gateway_marking_targets.pop(perception.ant_id, None)
-            self.gateway_probes.pop(perception.ant_id, None)
-            self.gateway_searches.pop(perception.ant_id, None)
+    def _exploration_home_pheromone_action(self, perception):
+        if not self._should_deposit_home_pheromone(perception):
+            return None
+        self._mark_shared_explored_zone(
+            self.positions.get(perception.ant_id, (0, 0)),
+            radius=HOME_PHEROMONE_EXPLORED_RADIUS,
+            amount=HOME_PHEROMONE_EXPLORED_WEIGHT,
+        )
+        return AntAction.DEPOSIT_HOME_PHEROMONE
+
+    def _should_start_food_pheromone_follow(self, perception):
+        if perception.ant_id in self.food_memory:
             return False
-        remaining = self.gateway_marking_steps.get(perception.ant_id, 0)
-        return remaining > 0 or perception.ant_id in self.gateway_marking_targets
+        if self._state(perception.ant_id) not in {STATE_INIT, STATE_EXPLORING, STATE_FOLLOW_WALL}:
+            return False
+        return self._food_pheromone_direction(perception) is not None
 
-    def _gateway_marking_direction(self, perception):
-        """Return to the colony after finding a useful gateway."""
-        if self._is_stagnating(perception):
-            self._mark_current_area_to_avoid(perception)
-            return self._best_home_direction(perception, self._home_direction(perception))
+    def _food_pheromone_direction(self, perception):
+        return self._pheromone_direction(
+            perception,
+            perception.food_pheromone,
+            threshold=FOOD_PHEROMONE_THRESHOLD,
+            outward=True,
+            remembered_kind="food",
+        )
 
+    def _food_pheromone_colony_direction(self, perception):
+        return self._pheromone_direction(
+            perception,
+            perception.food_pheromone,
+            threshold=FOOD_PHEROMONE_THRESHOLD,
+            outward=False,
+            inward=True,
+            remembered_kind="food",
+        )
+
+    def _home_pheromone_colony_direction(self, perception):
+        return self._pheromone_direction(
+            perception,
+            perception.home_pheromone,
+            threshold=HOME_PHEROMONE_THRESHOLD,
+            outward=False,
+            inward=True,
+            remembered_kind="home",
+        )
+
+    def _return_home_pheromone_action(self, perception):
         ant_id = perception.ant_id
-        self.gateway_marking_steps[ant_id] = self.gateway_marking_steps.get(ant_id, 1) - 1
-        mapped_home = self._mapped_direction_to(perception.ant_id, (0, 0))
-        home = mapped_home or self._home_direction(perception)
-        if home is not None:
-            return home
-        return self._mapped_random_direction(perception, target=self._home_direction(perception))
+        steps = self.return_home_pheromone_steps.get(ant_id, 0)
+        if steps >= RETURN_HOME_PHEROMONE_RESET_STEPS:
+            self.return_home_pheromone_steps.pop(ant_id, None)
+            self._set_substate(ant_id, None)
+            return None
 
-    def _gateway_return_action(self, perception):
-        """Return from a gateway while avoiding wall-hugging traps."""
-        direction = self._gateway_marking_direction(perception)
+        direction = self._home_pheromone_colony_direction(perception)
         if direction is None:
-            return self._wall_escape_action(perception, self._home_direction(perception))
-        if not is_blocked(perception, direction):
-            return turn_towards(perception, direction)
-
-        detour = self._mapped_random_direction(perception, target=self._home_direction(perception))
-        if detour is not None:
-            return turn_towards(perception, detour)
-        return self._move_home_or_turn(perception, direction)
-
-    def _gateway_probe_action(self, perception):
-        """Verify a suspected wall gap before marking it as a gateway."""
-        ant_id = perception.ant_id
-        probe = self.gateway_probes.get(ant_id)
-        if not probe or perception.has_food:
+            self.return_home_pheromone_steps.pop(ant_id, None)
             return None
 
+        self.return_home_pheromone_steps[ant_id] = steps + 1
+        if self._should_deposit_food_pheromone(perception):
+            return AntAction.DEPOSIT_FOOD_PHEROMONE
+        return selectmove(perception, direction)
+
+    def _pheromone_direction(self, perception, pheromone_map, threshold, outward=False, inward=False, remembered_kind=None):
+        directions = open_directions(perception)
+        if not directions:
+            return None
+
+        ant_id = perception.ant_id
         current = self.positions.get(ant_id, (0, 0))
-        target = probe["target"]
-        crossing = probe["direction"]
-
-        if probe["steps"] <= 0:
-            self.gateway_probes.pop(ant_id, None)
-            return None
-        probe["steps"] -= 1
-
-        distance = math.hypot(target[0] - current[0], target[1] - current[1])
-        if distance > 1.5:
-            return self._move_or_escape(perception, direction_from_delta(target[0] - current[0], target[1] - current[1]))
-
-        if is_blocked(perception, crossing):
-            self.gateway_probes.pop(ant_id, None)
-            return self._wall_escape_action(perception, self._home_direction(perception))
-
-        dx, dy = delta(crossing)
-        passed_depth = (current[0] - target[0]) * dx + (current[1] - target[1]) * dy
-        if passed_depth >= 1 and (passed_depth >= 2 or visible_free_distance(perception, crossing, max_steps=3) >= 2):
-            self._confirm_gateway(ant_id, target)
-            return self._gateway_return_action(perception)
-
-        return turn_towards(perception, crossing)
-
-    def _gateway_search_action(self, perception):
-        """Follow an observed wall deterministically until a gap probe starts."""
-        ant_id = perception.ant_id
-        search = self.gateway_searches.get(ant_id)
-        if not search or perception.has_food:
-            return None
-        if ant_id in self.gateway_probes or ant_id in self.gateway_marking_targets:
-            return None
-        if search["steps"] <= 0:
-            self.gateway_searches.pop(ant_id, None)
-            return None
-
-        search["steps"] -= 1
-        direction = search["direction"]
-        if is_blocked(perception, direction):
-            direction = Direction((direction.value + 4) % 8)
-            search["direction"] = direction
-            if is_blocked(perception, direction):
-                return self._best_open_action(perception, target=self._exploration_sector(perception), force_exploration=True)
-        return turn_towards(perception, direction)
-
-    def _confirm_gateway(self, ant_id, target):
-        """Store a verified gateway and start home-route marking."""
-        self.gateways.setdefault(ant_id, set()).add(target)
-        self.gateway_marking_targets[ant_id] = target
-        self.gateway_marking_steps[ant_id] = 300
-        self.gateway_probes.pop(ant_id, None)
-        self.gateway_searches.pop(ant_id, None)
-
-    def _home_trail_outward_direction(self, perception, threshold):
-        """Follow home pheromones away from the colony, not back into it."""
-        current = self.positions.get(perception.ant_id, (0, 0))
+        current_distance = math.hypot(*current)
         candidates = []
-        for direction in open_directions(perception):
-            dx, dy = delta(direction)
+
+        for direction in directions:
+            dx, dy = Direction.get_delta(direction)
             next_pos = (current[0] + dx, current[1] + dy)
-            if math.hypot(*next_pos) <= math.hypot(*current):
+            next_distance = math.hypot(*next_pos)
+            if outward and next_distance <= current_distance:
                 continue
-
-            score = 0.0
-            for (pdx, pdy), value in perception.home_pheromone.items():
-                if value < threshold:
-                    continue
-                absolute = (current[0] + pdx, current[1] + pdy)
-                outward = direction_from_delta(absolute[0], absolute[1])
-                angle = angular_distance(direction, outward)
-                if angle <= 2:
-                    score += value * ((3 - angle) / 3) / max(1.0, math.hypot(pdx, pdy))
-            if score >= threshold:
-                candidates.append((score + math.hypot(*next_pos) * 0.05, direction))
-
-        if not candidates:
-            return None
-        return max(candidates, key=lambda item: item[0])[1]
-
-    def _pheromone_path_direction(self, perception, pheromone_map, threshold):
-        """Follow pheromone trails in the colony-to-pheromone direction."""
-        current = self.positions.get(perception.ant_id, (0, 0))
-        candidates = []
-        for direction in open_directions(perception):
-            dx, dy = delta(direction)
-            next_pos = (current[0] + dx, current[1] + dy)
-            if self._inside_exhausted_zone(perception.ant_id, next_pos):
+            if inward and next_distance >= current_distance:
                 continue
 
             score = 0.0
@@ -484,8 +583,12 @@ class SmartStrategy(AntStrategy):
                 if value < threshold or (pdx, pdy) == (0, 0):
                     continue
                 absolute = (current[0] + pdx, current[1] + pdy)
-                colony_to_pheromone = direction_from_delta(absolute[0], absolute[1])
-                angle = angular_distance(direction, colony_to_pheromone)
+                if inward and math.hypot(*absolute) >= current_distance:
+                    continue
+                if outward and math.hypot(*absolute) <= current_distance:
+                    continue
+                trail_direction = direction_from_vector(absolute[0] - current[0], absolute[1] - current[1])
+                angle = angular_distance(direction, trail_direction)
                 if angle > 2:
                     continue
                 score += value * ((3 - angle) / 3) / max(1.0, math.hypot(pdx, pdy))
@@ -493,6 +596,7 @@ class SmartStrategy(AntStrategy):
             if score >= threshold:
                 if direction == perception.direction:
                     score *= 1.08
+                score += visible_free_distance(perception, direction) * 0.3
                 candidates.append((score, direction))
 
         if not candidates:
@@ -501,292 +605,396 @@ class SmartStrategy(AntStrategy):
         useful = [(score, direction) for score, direction in candidates if score >= best * 0.65]
         return random.choices([direction for _, direction in useful], weights=[score for score, _ in useful], k=1)[0]
 
+    def _remember_home_pheromone_exploration(self, perception):
+        ant_id = perception.ant_id
+        if ant_id is None:
+            return
+
+        current = self.positions.get(ant_id, (0, 0))
+        for (dx, dy), value in perception.home_pheromone.items():
+            if value < HOME_PHEROMONE_THRESHOLD:
+                continue
+            self._mark_shared_explored_zone(
+                (current[0] + dx, current[1] + dy),
+                radius=HOME_PHEROMONE_EXPLORED_RADIUS,
+                amount=value / 100.0,
+            )
+
+    def _clear_pheromone_memory(self, ant_id, kind):
+        return None
+
+    def follow_food_to_colony(self, perception):
+        """
+        Retourne la direction à suivre pour revenir à la bouffe
+        """
+        current = self.positions.get(perception.ant_id, (0, 0))
+        return (
+            self.stable_food_colony_paths.get(perception.ant_id, {}).get(current)
+            or self.food_colony_paths.get(perception.ant_id, {}).get(current)
+        )
+
+    def is_stagnating(self, perception):
+        """
+        Détecte la stagnation
+        """
+        recent = self.recent_positions.get(perception.ant_id, [])
+        if len(recent) < RECENT_WINDOW:
+            return False
+
+        center_x = sum(x for x, _ in recent) / len(recent)
+        center_y = sum(y for _, y in recent) / len(recent)
+        spread = max(math.hypot(x - center_x, y - center_y) for x, y in recent)
+        return spread <= STAGNATION_RADIUS and len(set(recent)) <= STAGNATION_UNIQUE_LIMIT
+
+    def merge_to_old_foodpath(self, perception):
+        """
+        Retour à un chemin connu
+        """
+        current = self.positions.get(perception.ant_id, (0, 0))
+        direction_map = (
+            self.stable_food_colony_paths.get(perception.ant_id)
+            or self.food_colony_paths.get(perception.ant_id, {})
+        )
+        if current in direction_map:
+            self._set_substate(perception.ant_id, RETURN_SUBSTATE_FOLLOW_PATH)
+            return direction_map[current]
+        direction = self._direct_direction_to_nearest_path_point(perception, direction_map)
+        if direction is not None:
+            self._set_substate(perception.ant_id, RETURN_SUBSTATE_FOLLOW_PATH)
+        return direction
+
+    def update_food_colony_paths(self, perception):
+        """
+        Met à jour le chemin food -> colony
+        """
+        ant_id = perception.ant_id
+        current = self.positions.get(ant_id, (0, 0))
+        previous = self.return_paths.setdefault(ant_id, [])
+        if not previous or previous[-1] != current:
+            previous.append(current)
+
+        self.food_colony_paths.setdefault(ant_id, {}).update(self._path_to_direction_map(previous))
+
+    def update_colony_food_paths(self, perception):
+        """
+        Met à jour le chemin colonie -> food
+        """
+        ant_id = perception.ant_id
+        current = self.positions.get(ant_id, (0, 0))
+        path = self.outbound_paths.setdefault(ant_id, [(0, 0)])
+        if not path or path[-1] != current:
+            path.append(current)
+        if len(path) > MAX_PATH_LENGTH:
+            del path[: len(path) - MAX_PATH_LENGTH]
+        self.colony_food_paths[ant_id] = self._path_to_direction_map(path)
+
+    def _set_colony_food_path(self, ant_id, path):
+        if ant_id is None or not path or len(path) < 2:
+            return
+        direction_map = self._path_to_direction_map(path)
+        self.colony_food_paths[ant_id] = direction_map
+        self.stable_colony_food_paths[ant_id] = dict(direction_map)
+
+    def _return_trouble_direction(self, perception):
+        """
+        Direction de secours pour une porteuse bloquee ou stagnante.
+        """
+        directions = open_directions(perception)
+        merge_direction = self.merge_to_old_foodpath(perception)
+        wall_escape_direction = self._away_from_nearest_wall_direction(perception)
+        home_direction = self._home_direction(perception)
+        if not directions:
+            return merge_direction or wall_escape_direction or home_direction
+
+        ant_id = perception.ant_id
+        current = self.positions.get(ant_id, (0, 0))
+
+        def score(direction):
+            dx, dy = Direction.get_delta(direction)
+            next_pos = (current[0] + dx, current[1] + dy)
+            value = visible_free_distance(perception, direction) * 0.25
+            value -= self._recent_revisit_penalty(ant_id, next_pos) * 1.5
+            value -= min(self.visit_counts.get(ant_id, {}).get(next_pos, 0), 20) * 0.35
+            value -= self._shared_explored_penalty(next_pos, returning=True)
+            if merge_direction is not None:
+                value -= angular_distance(direction, merge_direction) * 0.8
+            if wall_escape_direction is not None:
+                value -= angular_distance(direction, wall_escape_direction) * 0.7
+            if home_direction is not None:
+                value -= angular_distance(direction, home_direction) * 0.25
+            return value + random.random() * 0.15
+
+        return max(directions, key=score)
+
+    def _away_from_nearest_wall_direction(self, perception):
+        """
+        Direction opposee au mur visible le plus proche.
+        """
+        nearest_wall = None
+        nearest_distance = float("inf")
+        for (dx, dy), terrain in perception.visible_cells.items():
+            if terrain != TerrainType.WALL or (dx == 0 and dy == 0):
+                continue
+            distance = math.hypot(dx, dy)
+            if distance < nearest_distance:
+                nearest_wall = (dx, dy)
+                nearest_distance = distance
+        if nearest_wall is None:
+            return None
+        return direction_from_vector(-nearest_wall[0], -nearest_wall[1])
+
+    def _maybe_reset_return_substate(self, perception):
+        """
+        Réinitialise le substate de retour si la fourmi semble bloquée ou stagnante depuis trop longtemps.
+        """
+        ant_id = perception.ant_id
+        if ant_id is None:
+            return False
+
+        self.return_reset_steps[ant_id] = self.return_reset_steps.get(ant_id, 0) + 1
+        should_reset = False
+        if self.return_reset_steps[ant_id] >= RETURN_SUBSTATE_RESET_STEPS:
+            self.return_reset_steps[ant_id] = 0
+            should_reset = True
+
+        if should_reset and self._substate(ant_id) in RETURN_TROUBLE_SUBSTATES:
+            self._set_substate(ant_id, None)
+            return True
+        return False
+
+    def _clear_return_reset_state(self, ant_id):
+        """
+        Oublie l'état de réinitialisation pour la fourmi
+        """
+        self.return_reset_steps.pop(ant_id, None)
+        self.return_home_pheromone_steps.pop(ant_id, None)
+
+    def inverse_direction(self, direction):
+        """
+        Helper qui retourne la direction inverse
+        """
+        direction = as_direction(direction)
+        if direction is None:
+            return None
+        return Direction((direction.value + 4) % 8)
+
+    def _update_position(self, perception):
+        """
+        Met à jour la position de la fourmi
+        """
+        ant_id = perception.ant_id
+        if ant_id is None:
+            return
+
+        self.positions.setdefault(ant_id, (0, 0))
+        self.outbound_paths.setdefault(ant_id, [(0, 0)])
+
+        last = self.last_actions.get(ant_id)
+        if last is None:
+            return
+
+        action, direction, expected_move = last
+        if action != AntAction.MOVE_FORWARD or not expected_move:
+            return
+
+        x, y = self.positions[ant_id]
+        dx, dy = Direction.get_delta(direction)
+        new_pos = (x + dx, y + dy)
+        self.positions[ant_id] = new_pos
+        if not perception.has_food:
+            path = self.outbound_paths.setdefault(ant_id, [(0, 0)])
+            if not path or path[-1] != new_pos:
+                path.append(new_pos)
+
+    def _remember_action(self, perception, action):
+        """
+        Buffer se souvenant de l'action réalisé
+        """
+        ant_id = perception.ant_id
+        if ant_id is not None:
+            expected_move = action == AntAction.MOVE_FORWARD and not is_blocked(perception)
+            self.last_actions[ant_id] = (action, perception.direction, expected_move)
+        return action
+
     def _remember_food(self, perception):
-        """Remember food location and the path to exploit it later."""
+        """
+        Se souvient d'où elle a trouvé de la food
+        """
         ant_id = perception.ant_id
         if ant_id is None:
             return
         position = self.positions.get(ant_id, (0, 0))
         self.food_memory[ant_id] = position
-        self.last_food_taken[ant_id] = position
-        self._clear_exhausted_zone_near(ant_id, position)
-        self._append_path_position(ant_id, position)
-        path = list(self.outbound_paths.get(ant_id, [(0, 0)]))
-        self.food_paths[ant_id] = path
-        self.food_path_indices[ant_id] = 0
-        self.return_paths[ant_id] = list(reversed(path))
 
-    def _remembered_food_action(self, perception):
-        """Exploit remembered food until the local search declares it empty."""
-        ant_id = perception.ant_id
-        food = self.food_memory.get(ant_id)
+        path_to_food = list(self.outbound_paths.get(ant_id, [(0, 0)]))
+        if not path_to_food or path_to_food[-1] != position:
+            path_to_food.append(position)
+        self._set_colony_food_path(ant_id, path_to_food)
 
-        if food is None or self._inside_exhausted_zone(ant_id, food):
-            self._forget_food(ant_id)
-            return None
+        path_to_colony = list(reversed(path_to_food))
+        self.food_colony_paths[ant_id] = self._path_to_direction_map(path_to_colony)
+        self.stable_food_colony_paths[ant_id] = dict(self.food_colony_paths[ant_id])
+        self.return_paths[ant_id] = [position]
 
-        direction = self._food_path_direction(perception)
-        if direction is None and perception.steps_taken % 8 == 0:
-            direction = self._mapped_direction_to(ant_id, food)
-        if direction is None:
-            direction = direction_from_delta(food[0] - self.positions.get(ant_id, (0, 0))[0], food[1] - self.positions.get(ant_id, (0, 0))[1])
-        if direction is None:
-            return None
-        if self._should_deposit_food_on_known_path(perception) and self._is_aligned_for_return(perception, direction):
-            return AntAction.DEPOSIT_FOOD_PHEROMONE
-        return self._move_or_escape(perception, direction)
-
-    def _food_path_direction(self, perception):
-        """Follow the personal colony-to-food path."""
-        ant_id = perception.ant_id
-        path = self.food_paths.get(ant_id)
-        if not path:
-            return None
-        current = self.positions.get(ant_id, (0, 0))
-        index = self.food_path_indices.get(ant_id, 0)
-        while index < len(path) - 1 and path[index] == current:
-            index += 1
-        self.food_path_indices[ant_id] = index
-        target = path[index]
-        if target == current:
-            return None
-        return direction_from_delta(target[0] - current[0], target[1] - current[1])
-
-    def _return_path_direction(self, perception):
-        """Follow the remembered food-to-colony path."""
-        ant_id = perception.ant_id
-        path = self.return_paths.get(ant_id)
-        if not path:
-            return None
-        current = self.positions.get(ant_id, (0, 0))
-        nearest = min(range(len(path)), key=lambda i: math.hypot(path[i][0] - current[0], path[i][1] - current[1]))
-        target_index = min(nearest + 1, len(path) - 1) if math.hypot(path[nearest][0] - current[0], path[nearest][1] - current[1]) <= 1.5 else nearest
-        target = path[target_index]
-        if target == current:
-            return None
-        return direction_from_delta(target[0] - current[0], target[1] - current[1])
-
-    def _direction_to_reverse_path(self, perception):
-        """Move toward the closest point of the remembered reverse path."""
-        path = self.return_paths.get(perception.ant_id)
-        if not path:
-            return None
-
-        current = self.positions.get(perception.ant_id, (0, 0))
-        target = min(path, key=lambda point: math.hypot(point[0] - current[0], point[1] - current[1]))
-        if target == current:
-            return self._return_path_direction(perception)
-        return direction_from_delta(target[0] - current[0], target[1] - current[1])
-
-    def _clear_depleted_food_memory(self, perception):
-        """Mark food zones empty after searching just beyond the last taken food."""
-        ant_id = perception.ant_id
-        if ant_id is None or perception.has_food or perception.can_see_food():
-            return
-        food = self.last_food_taken.get(ant_id)
-        if food is None:
-            return
-
-        current = self.positions.get(ant_id, (0, 0))
-        colony_to_food = direction_from_delta(food[0], food[1])
-        fx, fy = delta(colony_to_food)
-        search_points = [(food[0], food[1])]
-        for step in (1, 2, 3):
-            search_points.append((food[0] + fx * step, food[1] + fy * step))
-            search_points.append((food[0] + fx * step + fy, food[1] + fy * step - fx))
-            search_points.append((food[0] + fx * step - fy, food[1] + fy * step + fx))
-
-        if min(math.hypot(px - current[0], py - current[1]) for px, py in search_points) > 1.5:
-            return
-        self._remember_exhausted_zone(ant_id, food, radius=4)
-        self._forget_food(ant_id)
-
-    def _forget_food(self, ant_id):
-        """Forget a depleted food target."""
+    def _discard_colony_food_route(self, ant_id):
+        target = self.food_memory.get(ant_id)
         self.food_memory.pop(ant_id, None)
-        self.food_paths.pop(ant_id, None)
-        self.food_path_indices.pop(ant_id, None)
+        self.colony_food_paths.pop(ant_id, None)
+        self.stable_colony_food_paths.pop(ant_id, None)
 
-    def _home_direction(self, perception):
-        """Return the direction to the known colony origin."""
-        x, y = self.positions.get(perception.ant_id, (0, 0))
-        if x == 0 and y == 0:
-            return None
-        return direction_from_delta(-x, -y)
+    def _remembered_food_is_empty(self, perception):
+        """
+        Détecte si le spot de nourriture mémorisé est vide
+        """
+        ant_id = perception.ant_id
+        target = self.food_memory.get(ant_id)
+        if target is None:
+            return False
+        current = self.positions.get(ant_id, (0, 0))
+        offset = (target[0] - current[0], target[1] - current[1])
+        terrain = perception.visible_cells.get(offset)
+        return terrain is not None and terrain != TerrainType.FOOD
 
-    def _move_or_escape(self, perception, direction):
-        """Move toward a direction, choosing an open alternative around walls."""
-        if direction is None:
-            return random_turn()
-        if is_blocked(perception) or is_blocked(perception, direction):
-            return self._wall_escape_action(perception, direction)
-        return turn_towards(perception, direction)
+    def _forget_empty_food_target(self, perception):
+        """
+        Oublie la cible de nourriture si EXPLORE_FOOD fail
+        """
+        ant_id = perception.ant_id
+        if ant_id is None:
+            return
+        target = self.food_memory.get(ant_id, self.positions.get(ant_id, (0, 0)))
+        self._add_zone(self.avoid_zones, ant_id, target, radius=8)
+        self.food_explore_steps.pop(ant_id, None)
+        self.food_search_targets.pop(ant_id, None)
+        self._discard_colony_food_route(ant_id)
+        self._start_empty_food_escape(ant_id, target)
+        self._set_state(ant_id, STATE_EXPLORING)
 
-    def _move_home_or_turn(self, perception, direction):
-        """Move toward home without exploration-biased randomness."""
-        if direction is None:
-            direction = self._home_direction(perception)
-        if direction is None:
-            return AntAction.MOVE_FORWARD if not is_blocked(perception) else random_turn()
-        if is_blocked(perception) or is_blocked(perception, direction):
-            direction = self._best_home_direction(perception, direction)
-        return turn_towards(perception, direction)
+    def _start_explore_food(self, perception, target=None):
+        """
+        Lance une courte recherche autour d'un ancien spot vide avant de l'oublier.
+        """
+        ant_id = perception.ant_id
+        if ant_id is None:
+            return
+        target = target or self.food_memory.get(ant_id)
+        self.food_search_targets[ant_id] = target or self.positions.get(ant_id, (0, 0))
+        self.food_explore_steps[ant_id] = 0
+        self._set_state(ant_id, STATE_EXPLORE_FOOD)
 
-    def _best_home_direction(self, perception, preferred):
-        """Pick the open direction that most reduces distance to colony."""
+    def _active_food_search_target(self, perception):
+        ant_id = perception.ant_id
+        return (
+            self.food_search_targets.get(ant_id)
+            or self.food_memory.get(ant_id)
+            or self.positions.get(ant_id, (0, 0))
+        )
+
+    def _start_empty_food_escape(self, ant_id, target):
+        if ant_id is None or target is None:
+            return
+        self.empty_food_escape_targets[ant_id] = target
+        self.empty_food_escape_steps[ant_id] = 0
+
+    def _is_escaping_empty_food(self, perception):
+        ant_id = perception.ant_id
+        if ant_id not in self.empty_food_escape_targets:
+            return False
+        target = self.empty_food_escape_targets[ant_id]
+        current = self.positions.get(ant_id, (0, 0))
+        steps = self.empty_food_escape_steps.get(ant_id, 0)
+        if (
+            steps >= EMPTY_FOOD_ESCAPE_STEPS
+            or math.hypot(current[0] - target[0], current[1] - target[1]) > EMPTY_FOOD_ESCAPE_RADIUS
+        ):
+            self.empty_food_escape_targets.pop(ant_id, None)
+            self.empty_food_escape_steps.pop(ant_id, None)
+            return False
+        return True
+
+    def _run_empty_food_escape(self, perception):
+        ant_id = perception.ant_id
+        if perception.can_see_food():
+            self.empty_food_escape_targets.pop(ant_id, None)
+            self.empty_food_escape_steps.pop(ant_id, None)
+            self._set_state(ant_id, STATE_COLLECTING)
+            return self._run_collecting(perception)
+
+        self.empty_food_escape_steps[ant_id] = self.empty_food_escape_steps.get(ant_id, 0) + 1
+        target = self.empty_food_escape_targets.get(ant_id)
+        return selectmove(perception, self._leave_empty_food_area_direction(perception, target))
+
+    def _is_food_search_stagnating(self, perception):
+        """
+        Detection plus reactive que la stagnation globale pendant EXPLORE_FOOD.
+        """
+        ant_id = perception.ant_id
+        if self.food_explore_steps.get(ant_id, 0) < 4:
+            return False
+        recent = self.recent_positions.get(ant_id, [])[-16:]
+        if len(recent) < 10:
+            return False
+        center_x = sum(x for x, _ in recent) / len(recent)
+        center_y = sum(y for _, y in recent) / len(recent)
+        spread = max(math.hypot(x - center_x, y - center_y) for x, y in recent)
+        return spread <= 4 and len(set(recent)) <= 7
+
+    def _leave_empty_food_area_direction(self, perception, target):
+        """
+        Choisit une direction ouverte qui sort du spot de nourriture vide.
+        """
         directions = open_directions(perception)
         if not directions:
             return None
 
-        current = self.positions.get(perception.ant_id, (0, 0))
-
-        def score(direction):
-            dx, dy = delta(direction)
-            next_pos = (current[0] + dx, current[1] + dy)
-            value = -math.hypot(*next_pos)
-            if preferred is not None:
-                value -= angular_distance(direction, preferred) * 0.35
-            if direction == perception.direction:
-                value += 0.1
-            value += visible_free_distance(perception, direction, max_steps=3) * 0.03
-            return value
-
-        return max(directions, key=score)
-
-    def _wall_escape_action(self, perception, preferred=None):
-        """Pick a scored open direction around a blockage."""
-        if random.random() < 0.5:
-            target = self._home_direction(perception)
-        else:
-            target = preferred
-        direction = self._mapped_random_direction(perception, target=target)
-        if direction is None:
-            direction = self._best_open_direction(perception, target=preferred, force_exploration=True)
-        return turn_towards(perception, direction) if direction is not None else random_turn()
-
-    def _best_open_action(self, perception, target=None, carrying_food=False, force_exploration=False):
-        """Turn toward the best immediate open direction."""
-        return turn_towards(perception, self._best_open_direction(perception, target, carrying_food, force_exploration))
-
-    def _best_open_direction(self, perception, target=None, carrying_food=False, force_exploration=False):
-        """Score open directions with personal memory and exploration pressure."""
-        directions = open_directions(perception)
-        if not directions:
-            return None
         ant_id = perception.ant_id
         current = self.positions.get(ant_id, (0, 0))
-        role = self._role(ant_id)
+        target = target or current
+        home_direction = self._home_direction(perception)
 
         def score(direction):
-            dx, dy = delta(direction)
+            dx, dy = Direction.get_delta(direction)
             next_pos = (current[0] + dx, current[1] + dy)
-            value = random.random() * 0.2
-            value += visible_free_distance(perception, direction) * 0.1
-            if direction == perception.direction:
-                value += 0.35
-            if target is not None:
-                value -= angular_distance(direction, target) * 0.55
-            if carrying_food:
-                value -= math.hypot(*next_pos) * 0.08
-            else:
-                value -= min(self.visit_counts.get(ant_id, {}).get(next_pos, 0), 8) * 0.3
-                value += self._frontier_score(ant_id, direction)
-                if self._inside_exhausted_zone(ant_id, next_pos) or self._inside_avoid_zone(ant_id, next_pos):
-                    value -= 3.0
-                if role == ROLE_EXPLORER:
-                    value += math.hypot(*next_pos) * 0.035
-            return value
+            distance_from_target = math.hypot(next_pos[0] - target[0], next_pos[1] - target[1])
+            value = distance_from_target * 1.2
+            value += visible_free_distance(perception, direction) * 0.35
+            value += self._map_frontier_score(ant_id, direction) * 0.6
+            value -= self._recent_revisit_penalty(ant_id, next_pos) * 2.0
+            value -= min(self.visit_counts.get(ant_id, {}).get(next_pos, 0), 20) * 0.45
+            if home_direction is not None:
+                value -= angular_distance(direction, home_direction) * 0.15
+            if self._inside_zone(self.avoid_zones, ant_id, next_pos):
+                value -= 4.0
+            if distance_from_target <= 3:
+                value -= 3.0
+            return value + random.random() * 0.2
 
         return max(directions, key=score)
 
-    def _exploration_sector(self, perception, offset=0):
-        """Give each ant a stable exploration sector."""
-        sectors = [(1, -1), (-1, -1), (1, 1), (-1, 1), (1, 0), (0, 1), (-1, 0), (0, -1)]
-        dx, dy = sectors[((perception.ant_id or 0) + offset) % len(sectors)]
-        return direction_from_delta(dx, dy)
-
-    def _new_gateway_direction(self, perception):
-        """Target remembered gateways that are not already saturated."""
-        current = self.positions.get(perception.ant_id, (0, 0))
-        gateways = self.gateways.get(perception.ant_id, set())
-        if not gateways:
-            return None
-        target = min(gateways, key=lambda g: self.visit_counts.get(perception.ant_id, {}).get(g, 0) + math.hypot(g[0] - current[0], g[1] - current[1]) * 0.1)
-        if math.hypot(target[0] - current[0], target[1] - current[1]) < 2:
-            return None
-        return direction_from_delta(target[0] - current[0], target[1] - current[1])
-
-    def _near_gateway(self, perception):
-        """Check whether the ant is on/near a remembered gateway."""
-        current = self.positions.get(perception.ant_id, (0, 0))
-        return any(math.hypot(g[0] - current[0], g[1] - current[1]) <= 2 for g in self.gateways.get(perception.ant_id, set()))
-
-    def _update_position(self, perception):
-        """Update home-relative odometry from the previous forward move."""
-        ant_id = perception.ant_id
-        if ant_id is None:
+    def _promote_successful_return_path(self, ant_id):
+        """
+        Promeut le chemin de retour food colonie pour les prochains retours
+        """
+        path = self.return_paths.get(ant_id)
+        if not path or len(path) < 2:
             return
-        self.positions.setdefault(ant_id, (0, 0))
-        self.outbound_paths.setdefault(ant_id, [(0, 0)])
-        last = self.last_actions.get(ant_id)
-        if last is None:
-            return
-        action, direction, expected = last
-        if action != AntAction.MOVE_FORWARD or not expected:
-            return
-        x, y = self.positions[ant_id]
-        dx, dy = delta(direction)
-        position = (x + dx, y + dy)
-        self.positions[ant_id] = position
-        if not perception.has_food:
-            self._append_path_position(ant_id, position)
-
-    def _remember_action(self, perception, action):
-        """Store action state needed for next-step odometry."""
-        if perception.ant_id is not None:
-            expected = action == AntAction.MOVE_FORWARD and not is_blocked(perception)
-            self.last_actions[perception.ant_id] = (action, perception.direction, expected)
-        return action
-
-    def _append_path_position(self, ant_id, position):
-        """Append to the personal outbound path."""
-        path = self.outbound_paths.setdefault(ant_id, [(0, 0)])
-        if not path or path[-1] != position:
-            path.append(position)
-        if len(path) > MAX_PATH_LENGTH:
-            del path[: len(path) - MAX_PATH_LENGTH]
-
-    def _reset_after_drop(self, perception):
-        """Reset colony-relative state after a successful drop."""
-        ant_id = perception.ant_id
-        if ant_id is None:
-            return
-        self.positions[ant_id] = (0, 0)
-        self.outbound_paths[ant_id] = [(0, 0)]
-        self.return_paths.pop(ant_id, None)
-        self.carrying_steps.pop(ant_id, None)
-        self.recent_positions[ant_id] = [(0, 0)]
-        if ant_id in self.food_paths:
-            self.food_path_indices[ant_id] = 0
-
-    def _update_carrying_state(self, perception):
-        """Count how long an ant has carried food."""
-        ant_id = perception.ant_id
-        if ant_id is None:
-            return
-        if perception.has_food:
-            self.carrying_steps[ant_id] = self.carrying_steps.get(ant_id, 0) + 1
-        else:
-            self.carrying_steps.pop(ant_id, None)
+        direction_map = self._path_to_direction_map(path)
+        self.stable_food_colony_paths[ant_id] = direction_map
+        self.food_colony_paths.setdefault(ant_id, {}).update(direction_map)
+        self._set_colony_food_path(ant_id, list(reversed(path)))
 
     def _remember_exploration_state(self, perception):
-        """Update visits, recent positions, and loop avoid zones."""
+        """
+        Se souvient des cellules visitées et vue
+        """
         ant_id = perception.ant_id
         if ant_id is None:
             return
+
         position = self.positions.get(ant_id, (0, 0))
         visits = self.visit_counts.setdefault(ant_id, {})
         visits[position] = visits.get(position, 0) + 1
+        self._remember_seen_empty_cells(perception, position, visits)
         if len(visits) > MAX_VISITED_CELLS:
             self._trim_map_around(visits, position, MAX_VISITED_CELLS)
 
@@ -794,461 +1002,408 @@ class SmartStrategy(AntStrategy):
         recent.append(position)
         if len(recent) > RECENT_WINDOW:
             del recent[: len(recent) - RECENT_WINDOW]
-        if len(recent) == RECENT_WINDOW:
-            center_x = sum(x for x, _ in recent) / len(recent)
-            center_y = sum(y for _, y in recent) / len(recent)
-            spread = max(math.hypot(x - center_x, y - center_y) for x, y in recent)
-            if spread <= 4 and len(set(recent)) <= 9:
-                zones = self.avoid_zones.setdefault(ant_id, [])
-                zones.append((int(round(center_x)), int(round(center_y)), 6))
-                if len(zones) > 8:
-                    del zones[: len(zones) - 8]
+
+    def _remember_seen_empty_cells(self, perception, current, visits):
+        """
+        Se souvient des cellules vides vues
+        """
+        ant_x, ant_y = current
+        for (dx, dy), terrain in perception.visible_cells.items():
+            if (dx, dy) == (0, 0) or terrain != TerrainType.EMPTY:
+                continue
+            position = (ant_x + dx, ant_y + dy)
+            visits[position] = visits.get(position, 0) + SEEN_EMPTY_VISIT_WEIGHT
 
     def _update_known_map(self, perception):
-        """Merge visible terrain and detect personal gateways."""
+        """
+        Met à jour la carte
+        """
         ant_id = perception.ant_id
         if ant_id is None:
             return
-        current = self.positions.get(ant_id, (0, 0))
-        known = self.known_maps.setdefault(ant_id, {})
-        saw_wall = TerrainType.WALL in perception.visible_cells.values()
-        if saw_wall and not perception.has_food:
-            self._start_gateway_search(perception, current)
-        detect_gateway = (
-            saw_wall
-            and not perception.has_food
-            and (
-                ant_id in self.gateway_searches
-                or perception.steps_taken % GATEWAY_DETECTION_PERIOD == (ant_id or 0) % GATEWAY_DETECTION_PERIOD
-            )
-        )
+
+        ant_x, ant_y = self.positions.get(ant_id, (0, 0))
+        known_map = self.known_maps.setdefault(ant_id, {})
         for (dx, dy), terrain in perception.visible_cells.items():
-            position = (current[0] + dx, current[1] + dy)
-            known[position] = terrain
-            if detect_gateway and terrain != TerrainType.WALL:
-                if math.hypot(dx, dy) > 3:
-                    continue
-                gateways = self.gateways.setdefault(ant_id, set())
-                probe = self._gateway_probe(known, position, current)
-                if probe is not None:
-                    target, probe_direction = probe
-                    self._start_gateway_probe(ant_id, current, target, probe_direction)
-                elif position in gateways and self._is_dead_end(known, position):
-                    gateways.discard(position)
-        if len(known) > MAX_KNOWN_CELLS:
-            self._trim_map_around(known, current, MAX_KNOWN_CELLS)
-        self._trim_gateways(ant_id, current)
+            known_map[(ant_x + dx, ant_y + dy)] = terrain
+        if len(known_map) > MAX_KNOWN_CELLS:
+            self._trim_map_around(known_map, (ant_x, ant_y), MAX_KNOWN_CELLS)
 
-    def _start_gateway_search(self, perception, current):
-        """Start a deterministic wall scan after a wall has been observed."""
-        ant_id = perception.ant_id
-        if ant_id is None:
-            return
-        if ant_id in self.gateway_probes or ant_id in self.gateway_marking_targets:
-            return
-        if perception.can_see_food() or any(value >= 8.0 for value in perception.food_pheromone.values()):
-            return
-        if math.hypot(*current) < 10:
-            return
-        existing = self.gateway_searches.get(ant_id)
-        if existing is not None and existing["steps"] > 0:
-            return
+    def _path_to_direction_map(self, path):
+        directions = {}
+        for current, next_pos in zip(path, path[1:]):
+            directions[current] = direction_from_vector(next_pos[0] - current[0], next_pos[1] - current[1])
+        return directions
 
-        wall_direction = self._closest_wall_direction(perception)
-        if wall_direction is None:
-            return
-        if distance_to_closest(perception, TerrainType.WALL) > 4:
-            return
-        if wall_direction in (Direction.EAST, Direction.WEST):
-            choices = (Direction.NORTH, Direction.SOUTH)
-        elif wall_direction in (Direction.NORTH, Direction.SOUTH):
-            choices = (Direction.EAST, Direction.WEST)
-        elif wall_direction in (Direction.NORTHEAST, Direction.SOUTHWEST):
-            choices = (Direction.NORTHWEST, Direction.SOUTHEAST)
-        else:
-            choices = (Direction.NORTHEAST, Direction.SOUTHWEST)
-
-        direction = choices[(ant_id or 0) % 2]
-        if is_blocked(perception, direction):
-            direction = choices[1 - ((ant_id or 0) % 2)]
-        self.gateway_searches[ant_id] = {
-            "direction": direction,
-            "steps": 18,
-        }
-
-    def _closest_wall_direction(self, perception):
-        """Return the direction to the closest visible wall."""
-        best = None
-        best_distance = float("inf")
-        for (dx, dy), terrain in perception.visible_cells.items():
-            if terrain != TerrainType.WALL or (dx, dy) == (0, 0):
-                continue
-            distance = math.hypot(dx, dy)
-            if distance < best_distance:
-                best_distance = distance
-                best = direction_from_delta(dx, dy)
-        return best
-
-    def _looks_like_gateway(self, known, position):
-        """Detect a passable opening through a wall/river-like barrier."""
-        if self._is_dead_end(known, position):
-            return False
-        return self._vertical_barrier_gateway(known, position) or self._horizontal_barrier_gateway(known, position)
-
-    def _gateway_probe_direction(self, known, position, current):
-        """Return the crossing direction to test a suspected wall opening."""
-        probe = self._gateway_probe(known, position, current)
-        return probe[1] if probe is not None else None
-
-    def _gateway_probe(self, known, position, current):
-        """Return the target gap cell and crossing direction to test it."""
-        if self._is_tight_dead_end(known, position):
+    def _home_direction(self, perception):
+        x, y = self.positions.get(perception.ant_id, (0, 0))
+        if x == 0 and y == 0:
             return None
-        if self._vertical_gap_candidate(known, position):
-            return position, Direction.EAST if current[0] <= position[0] else Direction.WEST
-        if self._horizontal_gap_candidate(known, position):
-            return position, Direction.SOUTH if current[1] <= position[1] else Direction.NORTH
-        adjacent = self._adjacent_river_gap_probe(known, position, current)
-        if adjacent is not None:
-            return adjacent
-        return None
+        return direction_from_vector(-x, -y)
 
-    def _start_gateway_probe(self, ant_id, current, target, direction):
-        """Start pursuing an observed wall gap until it can be tested."""
-        if ant_id in self.gateway_marking_targets:
-            return
-        existing = self.gateway_probes.get(ant_id)
-        if existing is not None:
-            old = existing["target"]
-            old_distance = math.hypot(old[0] - current[0], old[1] - current[1])
-            new_distance = math.hypot(target[0] - current[0], target[1] - current[1])
-            if old_distance <= new_distance:
-                return
-        if math.hypot(target[0] - current[0], target[1] - current[1]) > 7:
-            return
-        self.gateway_probes[ant_id] = {
-            "target": target,
-            "direction": direction,
-            "steps": 45,
-        }
-
-    def _vertical_barrier_gateway(self, known, position):
-        """Detect a bridge through a mostly vertical wall line."""
-        x, y = position
-        if not self._not_wall(known, (x - 1, y)) or not self._not_wall(known, (x + 1, y)):
-            return False
-        north_wall = self._wall_seen_along(known, x, y, 0, -1)
-        south_wall = self._wall_seen_along(known, x, y, 0, 1)
-        if not (north_wall and south_wall):
-            return False
-        return self._open_run(known, x, y, -1, 0) >= 1 and self._open_run(known, x, y, 1, 0) >= 1
-
-    def _vertical_gap_candidate(self, known, position):
-        """Detect a possible opening in a vertical barrier before full confirmation."""
-        x, y = position
-        if not self._not_wall(known, (x - 1, y)) or not self._not_wall(known, (x + 1, y)):
-            return False
-        wall_evidence = self._wall_seen_along(known, x, y, 0, -1) or self._wall_seen_along(known, x, y, 0, 1)
-        return wall_evidence and self._open_run(known, x, y, -1, 0) >= 1 and self._open_run(known, x, y, 1, 0) >= 1
-
-    def _horizontal_barrier_gateway(self, known, position):
-        """Detect a bridge through a mostly horizontal wall line."""
-        x, y = position
-        if not self._not_wall(known, (x, y - 1)) or not self._not_wall(known, (x, y + 1)):
-            return False
-        west_wall = self._wall_seen_along(known, x, y, -1, 0)
-        east_wall = self._wall_seen_along(known, x, y, 1, 0)
-        if not (west_wall and east_wall):
-            return False
-        return self._open_run(known, x, y, 0, -1) >= 1 and self._open_run(known, x, y, 0, 1) >= 1
-
-    def _horizontal_gap_candidate(self, known, position):
-        """Detect a possible opening in a horizontal barrier before full confirmation."""
-        x, y = position
-        if not self._not_wall(known, (x, y - 1)) or not self._not_wall(known, (x, y + 1)):
-            return False
-        wall_evidence = self._wall_seen_along(known, x, y, -1, 0) or self._wall_seen_along(known, x, y, 1, 0)
-        return wall_evidence and self._open_run(known, x, y, 0, -1) >= 1 and self._open_run(known, x, y, 0, 1) >= 1
-
-    def _adjacent_river_gap_probe(self, known, position, current):
-        """Detect a river gap from a cell beside the wall line."""
-        x, y = position
-        if self._river_gap_at(known, x + 1, y, vertical=True):
-            return (x + 1, y), Direction.EAST
-        if self._river_gap_at(known, x - 1, y, vertical=True):
-            return (x - 1, y), Direction.WEST
-        if self._river_gap_at(known, x, y + 1, vertical=False):
-            return (x, y + 1), Direction.SOUTH
-        if self._river_gap_at(known, x, y - 1, vertical=False):
-            return (x, y - 1), Direction.NORTH
-        return None
-
-    def _river_gap_at(self, known, x, y, vertical):
-        """Recognize an opening inside a long straight barrier."""
-        if not self._known_free(known, (x, y)):
-            return False
-        if vertical:
-            before = self._wall_seen_along(known, x, y, 0, -1)
-            after = self._wall_seen_along(known, x, y, 0, 1)
-            wall_count = self._wall_count_along(known, x, y, 0, -1) + self._wall_count_along(known, x, y, 0, 1)
-            sides_open = self._not_wall(known, (x - 1, y)) and self._not_wall(known, (x + 1, y))
-        else:
-            before = self._wall_seen_along(known, x, y, -1, 0)
-            after = self._wall_seen_along(known, x, y, 1, 0)
-            wall_count = self._wall_count_along(known, x, y, -1, 0) + self._wall_count_along(known, x, y, 1, 0)
-            sides_open = self._not_wall(known, (x, y - 1)) and self._not_wall(known, (x, y + 1))
-        return sides_open and (before or after) and wall_count >= 1
-
-    def _not_wall(self, known, position):
-        """Accept known free cells and still-unseen cells, but never walls."""
-        return known.get(position) != TerrainType.WALL
-
-    def _known_free(self, known, position):
-        """Treat any known non-wall cell as traversable for gateway detection."""
-        terrain = known.get(position)
-        return terrain is not None and terrain != TerrainType.WALL
-
-    def _wall_seen_along(self, known, x, y, dx, dy):
-        """Look for barrier evidence in a straight line from a candidate opening."""
-        for step in range(1, GATEWAY_SCAN_RADIUS + 1):
-            terrain = known.get((x + dx * step, y + dy * step))
-            if terrain == TerrainType.WALL:
-                return True
-        return False
-
-    def _wall_count_along(self, known, x, y, dx, dy):
-        """Count wall evidence in a straight line from a candidate opening."""
-        count = 0
-        for step in range(1, GATEWAY_SCAN_RADIUS + 1):
-            if known.get((x + dx * step, y + dy * step)) == TerrainType.WALL:
-                count += 1
-        return count
-
-    def _free_run(self, known, x, y, dx, dy):
-        """Count known free cells from a candidate gateway in one direction."""
-        count = 0
-        for step in range(1, 4):
-            terrain = known.get((x + dx * step, y + dy * step))
-            if terrain == TerrainType.WALL:
-                break
-            if terrain is not None:
-                count += 1
-        return count
-
-    def _open_run(self, known, x, y, dx, dy):
-        """Count cells from a gateway that are not known walls."""
-        count = 0
-        for step in range(1, 4):
-            terrain = known.get((x + dx * step, y + dy * step))
-            if terrain == TerrainType.WALL:
-                break
-            count += 1
-        return count
-
-    def _is_dead_end(self, known, position):
-        """Reject gateway candidates that look like local cul-de-sacs."""
-        open_count = 0
-        unknown_count = 0
-        wall_count = 0
-        for direction in Direction:
-            dx, dy = delta(direction)
-            terrain = known.get((position[0] + dx, position[1] + dy))
-            if terrain is None:
-                unknown_count += 1
-            elif terrain == TerrainType.WALL:
-                wall_count += 1
-            else:
-                open_count += 1
-        if open_count <= 1:
-            return True
-        return open_count <= 2 and unknown_count == 0 and wall_count >= 5
-
-    def _is_tight_dead_end(self, known, position):
-        """Reject only obvious one-way pockets before probing a possible gap."""
-        open_count = 0
-        for direction in Direction:
-            dx, dy = delta(direction)
-            if self._not_wall(known, (position[0] + dx, position[1] + dy)):
-                open_count += 1
-        return open_count <= 1
-
-    def _trim_gateways(self, ant_id, current):
-        """Keep the nearest gateway memories."""
-        gateways = self.gateways.get(ant_id)
-        if not gateways or len(gateways) <= MAX_GATEWAYS:
-            return
-        closest = sorted(gateways, key=lambda g: math.hypot(g[0] - current[0], g[1] - current[1]))[:MAX_GATEWAYS]
-        self.gateways[ant_id] = set(closest)
-
-    def _update_pheromone_spots(self, perception):
-        """Remember strong pheromone spots as personal landmarks."""
+    def _known_food_direction(self, perception):
         ant_id = perception.ant_id
-        if ant_id is None:
-            return
+        target = self.food_memory.get(ant_id)
+        mapped = self._mapped_direction_to(ant_id, target)
+        if mapped is not None and not is_blocked(perception, mapped):
+            return mapped
+
         current = self.positions.get(ant_id, (0, 0))
-        for kind, pheromones in (("food", perception.food_pheromone), ("home", perception.home_pheromone)):
-            spots = self.pheromone_spots.setdefault(ant_id, {}).setdefault(kind, {})
-            for (dx, dy), value in pheromones.items():
-                if value < 35 or (dx, dy) == (0, 0):
-                    continue
-                position = (current[0] + dx, current[1] + dy)
-                if kind == "food" and self._inside_exhausted_zone(ant_id, position):
-                    continue
-                spots[position] = max(spots.get(position, 0.0), value)
-            if len(spots) > MAX_PHEROMONE_SPOTS:
-                self.pheromone_spots[ant_id][kind] = dict(sorted(spots.items(), key=lambda item: item[1], reverse=True)[:MAX_PHEROMONE_SPOTS])
+        direct = direction_from_vector(target[0] - current[0], target[1] - current[1]) if target is not None else None
+        if direct is not None and not is_blocked(perception, direct):
+            return direct
 
-    def _remembered_pheromone_direction(self, perception, kind, closer_to_colony=False):
-        """Move toward remembered pheromone landmarks."""
-        spots = self.pheromone_spots.get(perception.ant_id, {}).get(kind, {})
-        if not spots:
+        directions = open_directions(perception)
+        if not directions or target is None:
             return None
+
+        def distance_after_step(direction):
+            dx, dy = Direction.get_delta(direction)
+            return math.hypot(target[0] - current[0] - dx, target[1] - current[1] - dy)
+
+        return min(directions, key=distance_after_step)
+
+    def _sector_direction(self, perception, offset=0):
+        sectors = [
+            (1, -1), (-1, -1), (1, 1), (-1, 1),
+            (1, 0), (0, 1), (-1, 0), (0, -1),
+        ]
+        return DIRECTION_BY_STEP[sectors[((perception.ant_id or 0) + offset) % len(sectors)]]
+
+    def _exploration_mode(self, perception):
+        offset = (perception.ant_id or 0) * (EXPLORATION_MODE_PERIOD // 3)
+        phase = ((perception.steps_taken + offset) // EXPLORATION_MODE_PERIOD) % 2
+        return EXPLORATION_FAR if phase else EXPLORATION_LOCAL
+
+    def _exploration_direction(self, perception):
+        if self._exploration_mode(perception) == EXPLORATION_LOCAL:
+            return self._sector_direction(perception)
+        away_from_colony = self.inverse_direction(self._home_direction(perception))
+        return away_from_colony or self._sector_direction(perception)
+
+    def _carrier_patrol_direction(self, perception):
         current = self.positions.get(perception.ant_id, (0, 0))
-        candidates = []
-        for position, value in spots.items():
-            if closer_to_colony and math.hypot(*position) >= math.hypot(*current):
-                continue
-            distance = math.hypot(position[0] - current[0], position[1] - current[1])
-            if distance > 1:
-                candidates.append((value / (1 + distance * 0.2), position))
-        if not candidates:
-            return None
-        _, target = max(candidates, key=lambda item: item[0])
-        return direction_from_delta(target[0] - current[0], target[1] - current[1])
+        distance = math.hypot(*current)
+        if distance > 16:
+            return self._home_direction(perception)
+        if distance < 5:
+            return self._sector_direction(perception, offset=2)
 
-    def _is_stagnating(self, perception):
-        """Detect when an ant loops in the same small area."""
-        recent = self.recent_positions.get(perception.ant_id, [])
-        if len(recent) < RECENT_WINDOW:
-            return False
-        center_x = sum(x for x, _ in recent) / len(recent)
-        center_y = sum(y for _, y in recent) / len(recent)
-        spread = max(math.hypot(x - center_x, y - center_y) for x, y in recent)
-        return spread <= STAGNATION_RADIUS and len(set(recent)) <= STAGNATION_UNIQUE_LIMIT
+        radial = direction_from_vector(current[0], current[1])
+        side = 2 if (perception.ant_id or 0) % 2 == 0 else -2
+        return Direction((radial.value + side) % 8)
 
-    def _mark_current_area_to_avoid(self, perception):
-        """Remember a loop area so exploration scores push away from it."""
-        ant_id = perception.ant_id
-        if ant_id is None:
-            return
-        x, y = self.positions.get(ant_id, (0, 0))
-        zones = self.avoid_zones.setdefault(ant_id, [])
-        zones.append((x, y, 6))
-        if len(zones) > 8:
-            del zones[: len(zones) - 8]
+    def _exploration_move(self, perception, target=None):
+        return selectmove(
+            perception,
+            self._best_open_direction(
+                perception,
+                target=target or self._exploration_direction(perception),
+                force_exploration=True,
+            ),
+        )
 
-    def _mapped_random_direction(self, perception, target=None):
-        """Randomly choose an open direction weighted by frontier and target value."""
+    def _best_open_direction(self, perception, target=None, force_exploration=False):
         directions = open_directions(perception)
         if not directions:
             return None
 
         ant_id = perception.ant_id
-        weights = []
-        for direction in directions:
-            dx, dy = delta(direction)
-            current = self.positions.get(ant_id, (0, 0))
-            next_pos = (current[0] + dx, current[1] + dy)
-            weight = 1.0 + max(0.0, self._frontier_score(ant_id, direction))
-            weight += max(0.0, visible_free_distance(perception, direction) * 0.08)
-            weight -= min(self.visit_counts.get(ant_id, {}).get(next_pos, 0), 8) * 0.2
-            if self._inside_avoid_zone(ant_id, next_pos):
-                weight *= 0.2
-            if direction == perception.direction:
-                weight += 0.6
-            if target is not None:
-                weight += 2.0 / (1 + angular_distance(direction, target))
-            weights.append(max(0.05, weight))
-
-        return random.choices(directions, weights=weights, k=1)[0]
-
-    def _start_unstuck(self, perception):
-        """Pick one exploration-biased action away from a stagnation zone."""
-        direction = self._mapped_random_direction(perception, target=self._exploration_sector(perception))
-        if direction is None:
-            return random_turn()
-        return turn_towards(perception, direction)
-
-    def _frontier_score(self, ant_id, direction):
-        """Reward directions that reveal unknown cells."""
-        known = self.known_maps.get(ant_id, {})
         current = self.positions.get(ant_id, (0, 0))
-        dx, dy = delta(direction)
+
+        def score(direction):
+            dx, dy = Direction.get_delta(direction)
+            next_pos = (current[0] + dx, current[1] + dy)
+            value = random.random() * 0.15
+            value += visible_free_distance(perception, direction) * 0.08
+            value -= min(self.visit_counts.get(ant_id, {}).get(next_pos, 0), 8) * 0.25
+            value -= self._recent_revisit_penalty(ant_id, next_pos)
+            value -= self._shared_explored_direction_penalty(current, direction)
+            value += self._map_frontier_score(ant_id, direction)
+            if direction == perception.direction:
+                value += 0.35
+            if target is not None:
+                value -= angular_distance(direction, target) * 0.55
+            away_from_colony = self.inverse_direction(self._home_direction(perception))
+            exploration_mode = self._exploration_mode(perception)
+            if force_exploration and exploration_mode == EXPLORATION_FAR and away_from_colony is not None:
+                value -= angular_distance(direction, away_from_colony) * EXPLORATION_AWAY_FROM_COLONY_WEIGHT
+            if force_exploration and exploration_mode == EXPLORATION_LOCAL:
+                value -= self._wall_contact_score(perception, direction) * LOCAL_WALL_CONTACT_PENALTY
+            if self._inside_zone(self.avoid_zones, ant_id, next_pos):
+                value -= 3.0 if force_exploration else 1.2
+            return value
+
+        return max(directions, key=score)
+
+    def _best_unstuck_direction(self, perception):
+        directions = open_directions(perception)
+        if not directions:
+            return None
+
+        ant_id = perception.ant_id
+        current = self.positions.get(ant_id, (0, 0))
+
+        def score(direction):
+            dx, dy = Direction.get_delta(direction)
+            next_pos = (current[0] + dx, current[1] + dy)
+            value = visible_free_distance(perception, direction) * 0.2
+            value -= min(self.visit_counts.get(ant_id, {}).get(next_pos, 0), 20) * 0.5
+            value -= self._recent_revisit_penalty(ant_id, next_pos) * 1.5
+            value -= self._shared_explored_direction_penalty(current, direction)
+            if self._inside_zone(self.avoid_zones, ant_id, next_pos):
+                value -= 4.0
+            return value + random.random() * 0.25
+
+        return max(directions, key=score)
+
+    def _map_frontier_score(self, ant_id, direction):
+        known_map = self.known_maps.get(ant_id, {})
+        current = self.positions.get(ant_id, (0, 0))
+        dx, dy = Direction.get_delta(direction)
         score = 0.0
         for step in range(1, FRONTIER_LOOKAHEAD + 1):
             position = (current[0] + dx * step, current[1] + dy * step)
-            terrain = known.get(position)
+            terrain = known_map.get(position)
             if terrain == TerrainType.WALL:
-                score -= 1.4 / step
+                score -= 1.5 / step
                 break
             if terrain is None:
-                score += 1.2 / step
+                score += 1.4 / step
         return score
 
-    def _mapped_direction_to(self, ant_id, target):
-        """Bounded A* over known non-wall cells."""
-        known = self.known_maps.get(ant_id, {})
+    def _wall_follow_score(self, perception, direction):
+        ant_id = perception.ant_id
         current = self.positions.get(ant_id, (0, 0))
-        if ant_id is None or current == target or target not in known:
+        dx, dy = Direction.get_delta(direction)
+        next_pos = (current[0] + dx, current[1] + dy)
+        wall_neighbors = 0
+        for side in (-1, 1):
+            side_direction = Direction((direction.value + side) % 8)
+            sx, sy = Direction.get_delta(side_direction)
+            if perception.visible_cells.get((dx + sx, dy + sy)) == TerrainType.WALL:
+                wall_neighbors += 1
+        value = wall_neighbors * 2.0 + visible_free_distance(perception, direction) * 0.2
+        value -= min(self.visit_counts.get(ant_id, {}).get(next_pos, 0), 20) * 0.55
+        value -= self._recent_revisit_penalty(ant_id, next_pos) * 2.0
+        value -= self._shared_explored_direction_penalty(current, direction)
+        if direction == perception.direction:
+            value += 0.2
+        return value
+
+    def _wall_contact_score(self, perception, direction):
+        dx, dy = Direction.get_delta(direction)
+        score = 0
+        for offset in (-2, -1, 1, 2):
+            side_direction = Direction((direction.value + offset) % 8)
+            sx, sy = Direction.get_delta(side_direction)
+            if perception.visible_cells.get((dx + sx, dy + sy)) == TerrainType.WALL:
+                score += 1
+        return score
+
+    def _explore_food_direction(self, perception):
+        directions = open_directions(perception)
+        if not directions:
+            return None
+
+        ant_id = perception.ant_id
+        current = self.positions.get(ant_id, (0, 0))
+        away_from_colony = self.inverse_direction(self._home_direction(perception))
+
+        def score(direction):
+            dx, dy = Direction.get_delta(direction)
+            next_pos = (current[0] + dx, current[1] + dy)
+            value = visible_free_distance(perception, direction) * 0.25
+            value -= min(self.visit_counts.get(ant_id, {}).get(next_pos, 0), 20) * 0.6
+            value -= self._recent_revisit_penalty(ant_id, next_pos) * 2.0
+            value += self._map_frontier_score(ant_id, direction) * 0.8
+            if away_from_colony is not None:
+                value -= angular_distance(direction, away_from_colony) * 0.25
+            if self._inside_zone(self.avoid_zones, ant_id, next_pos):
+                value -= 3.0
+            return value + random.random() * 0.2
+
+        return max(directions, key=score)
+
+    def _recent_revisit_penalty(self, ant_id, position):
+        recent = self.recent_positions.get(ant_id, [])
+        penalty = 0.0
+        for age, old_position in enumerate(reversed(recent[-12:]), start=1):
+            if old_position == position:
+                penalty += RECENT_REVISIT_PENALTY * (13 - age)
+        return penalty
+
+    def _direction_repeats_recent_position(self, perception, direction):
+        ant_id = perception.ant_id
+        current = self.positions.get(ant_id, (0, 0))
+        dx, dy = Direction.get_delta(direction)
+        next_pos = (current[0] + dx, current[1] + dy)
+        return next_pos in self.recent_positions.get(ant_id, [])[-8:]
+
+    def _direct_direction_to_nearest_path_point(self, perception, direction_map):
+        if not direction_map:
+            return None
+
+        ant_id = perception.ant_id
+        current = self.positions.get(ant_id, (0, 0))
+        path_points = set(direction_map)
+        for point, direction in direction_map.items():
+            dx, dy = Direction.get_delta(direction)
+            path_points.add((point[0] + dx, point[1] + dy))
+
+        targets = sorted(path_points, key=lambda point: math.hypot(point[0] - current[0], point[1] - current[1]))
+        fallback = None
+        for target in targets:
+            if target == current:
+                direction = direction_map.get(current)
+            else:
+                direction = direction_from_vector(target[0] - current[0], target[1] - current[1])
+            if direction is None:
+                continue
+            if fallback is None:
+                fallback = direction
+            if not is_blocked(perception, direction):
+                return direction
+        return fallback
+
+    def _mapped_direction_to(self, ant_id, target):
+        if ant_id is None or target is None:
+            return None
+        known_map = self.known_maps.get(ant_id, {})
+        current = self.positions.get(ant_id, (0, 0))
+        if current == target:
             return None
 
         queue = [(0.0, 0.0, current)]
         came_from = {current: None}
         costs = {current: 0.0}
         searched = 0
-        while queue and searched < MAX_ASTAR_NODES:
-            _, cost, position = heapq.heappop(queue)
-            if cost > costs.get(position, float("inf")):
+
+        while queue and searched < MAX_MAP_SEARCH_NODES:
+            _, current_cost, position = heapq.heappop(queue)
+            if current_cost > costs.get(position, float("inf")):
                 continue
             searched += 1
             if position == target:
                 break
+
             for direction in Direction:
-                dx, dy = delta(direction)
+                dx, dy = Direction.get_delta(direction)
                 neighbor = (position[0] + dx, position[1] + dy)
-                if known.get(neighbor) == TerrainType.WALL or neighbor not in known:
+                if known_map.get(neighbor) == TerrainType.WALL:
                     continue
-                new_cost = cost + 1.0 + min(self.visit_counts.get(ant_id, {}).get(neighbor, 0), 6) * 0.1
+                if neighbor not in known_map and neighbor != target:
+                    continue
+
+                new_cost = current_cost + 1.0 + min(self.visit_counts.get(ant_id, {}).get(neighbor, 0), 8) * 0.12
                 if new_cost >= costs.get(neighbor, float("inf")):
                     continue
                 costs[neighbor] = new_cost
                 came_from[neighbor] = position
                 heuristic = math.hypot(target[0] - neighbor[0], target[1] - neighbor[1])
                 heapq.heappush(queue, (new_cost + heuristic, new_cost, neighbor))
+
         if target not in came_from:
             return None
+
         step = target
         while came_from[step] is not None and came_from[step] != current:
             step = came_from[step]
-        return direction_from_delta(step[0] - current[0], step[1] - current[1])
+        return direction_from_vector(step[0] - current[0], step[1] - current[1])
 
-    def _remember_exhausted_zone(self, ant_id, center, radius):
-        """Remember a depleted food zone."""
-        zones = self.exhausted_zones.setdefault(ant_id, [])
+    def _mark_current_area_to_avoid(self, perception):
+        ant_id = perception.ant_id
+        recent = self.recent_positions.get(ant_id, [])
+        if recent:
+            center = (
+                sum(x for x, _ in recent) / len(recent),
+                sum(y for _, y in recent) / len(recent),
+            )
+            self._add_zone(self.avoid_zones, ant_id, center, radius=7)
+
+    def _add_zone(self, zone_store, ant_id, center, radius):
+        zones = zone_store.setdefault(ant_id, [])
         zone = (int(round(center[0])), int(round(center[1])), radius)
         if zone not in zones:
             zones.append(zone)
         if len(zones) > 8:
             del zones[: len(zones) - 8]
 
-    def _clear_exhausted_zone_near(self, ant_id, position):
-        """Clear an exhausted marker when food is found there again."""
-        zones = self.exhausted_zones.get(ant_id)
-        if not zones:
+    def _inside_zone(self, zone_store, ant_id, position):
+        if position is None:
+            return False
+        return any(
+            math.hypot(position[0] - x, position[1] - y) <= radius
+            for x, y, radius in zone_store.get(ant_id, [])
+        )
+
+    def _mark_shared_explored_zone(self, center, radius, amount=1.0):
+        if center is None:
             return
-        self.exhausted_zones[ant_id] = [z for z in zones if math.hypot(position[0] - z[0], position[1] - z[1]) > z[2]]
+        cx, cy = int(round(center[0])), int(round(center[1]))
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                if math.hypot(dx, dy) > radius:
+                    continue
+                position = (cx + dx, cy + dy)
+                self.shared_explored_cells[position] = min(
+                    12.0,
+                    self.shared_explored_cells.get(position, 0.0) + amount,
+                )
+        if len(self.shared_explored_cells) > SHARED_EXPLORED_MAX_CELLS:
+            keep = set(
+                sorted(
+                    self.shared_explored_cells,
+                    key=lambda pos: math.hypot(pos[0] - cx, pos[1] - cy),
+                )[:SHARED_EXPLORED_MAX_CELLS]
+            )
+            for position in list(self.shared_explored_cells):
+                if position not in keep:
+                    del self.shared_explored_cells[position]
 
-    def _inside_exhausted_zone(self, ant_id, position):
-        """Check exhausted zones."""
-        return any(math.hypot(position[0] - x, position[1] - y) <= radius for x, y, radius in self.exhausted_zones.get(ant_id, []))
+    def _shared_explored_penalty(self, position, returning=False):
+        value = self.shared_explored_cells.get(position, 0.0)
+        if value <= 0:
+            return 0.0
+        return value * (0.25 if returning else 1.35)
 
-    def _inside_avoid_zone(self, ant_id, position):
-        """Check local loop-avoid zones."""
-        return any(math.hypot(position[0] - x, position[1] - y) <= radius for x, y, radius in self.avoid_zones.get(ant_id, []))
+    def _shared_explored_direction_penalty(self, current, direction, returning=False):
+        dx, dy = Direction.get_delta(direction)
+        penalty = 0.0
+        for step in range(1, SHARED_EXPLORED_LOOKAHEAD + 1):
+            position = (current[0] + dx * step, current[1] + dy * step)
+            penalty += self._shared_explored_penalty(position, returning=returning) / step
+        return penalty
 
     def _trim_map_around(self, mapping, center, max_size):
-        """Keep nearest entries in a bounded memory dictionary."""
-        keep = set(sorted(mapping, key=lambda pos: math.hypot(pos[0] - center[0], pos[1] - center[1]))[:max_size])
+        keep = set(
+            sorted(mapping, key=lambda pos: math.hypot(pos[0] - center[0], pos[1] - center[1]))[:max_size]
+        )
         for position in list(mapping):
             if position not in keep:
                 del mapping[position]
+
+    def _plan_initial_sidestep(self, perception):
+        ant_id = perception.ant_id
+        direction_value = perception.direction.value
+        count = self.initial_direction_counts.get(direction_value, 0)
+        self.initial_direction_counts[direction_value] = count + 1
+
+        if count == 0:
+            return
+        if count % 2:
+            self.sidestep_plans[ant_id] = [AntAction.TURN_LEFT, AntAction.MOVE_FORWARD, AntAction.TURN_RIGHT]
+        else:
+            self.sidestep_plans[ant_id] = [AntAction.TURN_RIGHT, AntAction.MOVE_FORWARD, AntAction.TURN_LEFT]
+
+    def _initial_sidestep_action(self, perception):
+        plan = self.sidestep_plans.get(perception.ant_id)
+        if not plan:
+            return None
+
+        action = plan.pop(0)
+        if action == AntAction.MOVE_FORWARD and is_blocked(perception):
+            action = plan.pop(0) if plan else None
+        if not plan:
+            self.sidestep_plans.pop(perception.ant_id, None)
+        return action
